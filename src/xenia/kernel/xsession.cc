@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2024 Xenia Emulator. All rights reserved.                        *
+ * Copyright 2025 Xenia Canary. All rights reserved.                          *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -14,6 +14,7 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/XLiveAPI.h"
 #include "xenia/kernel/xsession.h"
+#include "xenia/ui/imgui_host_notification.h"
 
 DECLARE_bool(upnp);
 
@@ -23,11 +24,11 @@ namespace kernel {
 XSession::XSession(KernelState* kernel_state)
     : XObject(kernel_state, Type::Session) {
   session_id_ = -1;
+  owner_xuid_ = 0;
 }
 
 X_STATUS XSession::Initialize() {
-  auto native_object = CreateNative(static_cast<uint32_t>(
-      std::max(sizeof(X_KSESSION), sizeof(X_DISPATCH_HEADER))));
+  auto native_object = CreateNative(sizeof(X_KSESSION));
   if (!native_object) {
     return X_STATUS_NO_MEMORY;
   }
@@ -53,19 +54,42 @@ X_RESULT XSession::CreateSession(uint32_t user_index, uint8_t public_slots,
     return X_ERROR_FUNCTION_FAILED;
   }
 
+  owner_xuid_ = user_profile->xuid();
+
+  const auto user_tracker = kernel_state()->xam_state()->user_tracker();
+
+  user_tracker->AddOwnedSession(user_profile->xuid(), handle());
+
+  // Mutually exclusive
+  if (flags & JOIN_VIA_PRESENCE_DISABLED &&
+      flags & JOIN_VIA_PRESENCE_FRIENDS_ONLY) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
+  // ARBITRATION requires stats and peer network flags to be set.
+  if (flags & ARBITRATION && !(flags & STATS || flags & PEER_NETWORK)) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
   // Session type is ranked but ARBITRATION flag isn't set
-  if (GetGameTypeValue(user_profile->xuid()) == X_CONTEXT_GAME_TYPE_RANKED &&
+  if (user_tracker->GetGameTypeValue(user_profile->xuid()) ==
+          X_CONTEXT_GAME_TYPE_RANKED &&
       !(flags & ARBITRATION)) {
     return X_ONLINE_E_SESSION_REQUIRES_ARBITRATION;
   }
+
+  // Set early so utility functions can check flags
+  local_details_.Flags = flags;
+
+  // Check we have privileges to create sessions.
+  // XPRIVILEGE_MULTIPLAYER_SESSIONS = 254
+  // XPRIVILEGE_SESSIONS = 189
 
   // 58410889
   // If a session requires online features but we're offline then we must fail.
   // e.g. Trying to create a SINGLEPLAYER_WITH_STATS session while not connected
   // to live.
-  if (HasXboxLiveFeatureFlags() &&
-      user_profile->signin_state() !=
-          xam::X_USER_SIGNIN_STATE::SignedInToLive) {
+  if (IsXboxLiveSession() && !user_profile->IsSignedInToLive()) {
     return X_ONLINE_E_SESSION_NOT_LOGGED_ON;
   }
 
@@ -81,9 +105,6 @@ X_RESULT XSession::CreateSession(uint32_t user_index, uint8_t public_slots,
 
   local_details_.UserIndexHost = XUserIndexNone;
 
-  // Set early so utility functions can check flags
-  local_details_.Flags = flags;
-
   // CSGO only uses STATS flag to create a session to POST stats pre round.
   // Minecraft and Portal 2 use flags HOST + STATS.
   //
@@ -92,7 +113,7 @@ X_RESULT XSession::CreateSession(uint32_t user_index, uint8_t public_slots,
   //
   // Create presence sessions?
   // - Create when joining a session
-  // - Explicitly create a presence session (Frogger without HOST bit)
+  // - Explicitly create a presence session (Frogger & TRON without HOST bit)
   // Based on Presence flag set?
 
   // 584107FB expects offline session creation by specifying 0 (a session
@@ -105,15 +126,17 @@ X_RESULT XSession::CreateSession(uint32_t user_index, uint8_t public_slots,
     CreateStatsSession(SessionInfo_ptr, Nonce_ptr, user_index, public_slots,
                        private_slots, flags);
   } else if (HasSessionFlag((SessionFlags)flags, HOST) ||
-             flags == SINGLEPLAYER_WITH_STATS || HasOfflineFlags()) {
+             flags == SINGLEPLAYER_WITH_STATS || IsOfflineSession()) {
     CreateHostSession(SessionInfo_ptr, Nonce_ptr, user_index, public_slots,
                       private_slots, flags);
   } else {
     JoinExistingSession(SessionInfo_ptr);
   }
 
-  local_details_.GameType = GetGameTypeValue(user_profile->xuid());
-  local_details_.GameMode = GetGameModeValue(user_profile->xuid());
+  local_details_.GameType =
+      user_tracker->GetGameTypeValue(user_profile->xuid());
+  local_details_.GameMode =
+      user_tracker->GetGameModeValue(user_profile->xuid());
   local_details_.MaxPublicSlots = public_slots;
   local_details_.MaxPrivateSlots = private_slots;
   local_details_.AvailablePublicSlots = public_slots;
@@ -153,15 +176,16 @@ X_RESULT XSession::CreateHostSession(XSESSION_INFO* session_info,
   session_data.num_slots_private = private_slots;
   session_data.flags = flags;
 
-  const uint64_t systemlink_id = XLiveAPI::systemlink_id;
+  const uint64_t systemlink_id =
+      kernel_state()->GetXboxLiveAPI()->GetSystemlinkID();
 
-  if (HasOfflineFlags()) {
+  if (IsOfflineSession()) {
     XELOGI("Creating an offline session");
 
     // what session ID mask should be used here?
     session_id_ = GenerateSessionId(XNKID_SYSTEM_LINK);
 
-  } else if (HasSystemlinkFlags()) {
+  } else if (IsSystemlinkSession()) {
     XELOGI("Creating systemlink session");
 
     // If XNetRegisterKey did not register key then we must register it here
@@ -169,17 +193,16 @@ X_RESULT XSession::CreateHostSession(XSESSION_INFO* session_info,
       session_id_ = systemlink_id;
     } else {
       session_id_ = GenerateSessionId(XNKID_SYSTEM_LINK);
-      XLiveAPI::systemlink_id = session_id_;
+      kernel_state()->GetXboxLiveAPI()->SetSystemlinkID(session_id_);
     }
-  } else if (HasXboxLiveFeatureFlags()) {
+  } else if (IsXboxLiveSession()) {
     XELOGI("Creating xbox live session");
     session_id_ = GenerateSessionId(XNKID_ONLINE);
 
-    // 58410821 adds properties after session creation
-    // Properties are ad-hoc therefore should be updated on backend, only
-    // update if value changed to reduce POST requests.
-    XLiveAPI::XSessionCreate(session_id_, &session_data);
-    XLiveAPI::SessionPropertiesSet(session_id_, session_data.user_index);
+    NotifySessionCreationWarning(user_index);
+
+    kernel_state()->GetXboxLiveAPI()->XSessionCreate(session_id_,
+                                                     &session_data);
   } else {
     assert_always();
   }
@@ -218,13 +241,13 @@ X_RESULT XSession::JoinExistingSession(XSESSION_INFO* session_info) {
     assert_always();
   }
 
-  const std::unique_ptr<SessionObjectJSON> session =
-      XLiveAPI::XSessionGet(session_id_);
+  const auto session =
+      kernel_state()->GetXboxLiveAPI()->XSessionGet(session_id_);
 
   // Begin XNetRegisterKey?
 
-  if (!session->HostAddress().empty()) {
-    GetXnAddrFromSessionObject(session.get(), &session_info->hostAddress);
+  if (!session.HostAddress().empty()) {
+    XLiveAPI::GetXnAddrFromSessionObject(session, &session_info->hostAddress);
   }
 
   return X_ERROR_SUCCESS;
@@ -233,13 +256,20 @@ X_RESULT XSession::JoinExistingSession(XSESSION_INFO* session_info) {
 X_RESULT XSession::DeleteSession(XGI_SESSION_STATE* state) {
   // Begin XNetUnregisterKey?
 
-  state_ |= STATE_FLAGS_DELETED;
-
-  if (IsHost() && HasXboxLiveFeatureFlags()) {
-    XLiveAPI::DeleteSession(session_id_);
+  if (IsDeleted()) {
+    return X_ERROR_SUCCESS;
   }
 
-  session_id_ = 0;
+  state_ |= STATE_FLAGS_DELETED;
+
+  if (IsHost() && IsXboxLiveSession()) {
+    kernel_state()->GetXboxLiveAPI()->DeleteSession(session_id_);
+  }
+
+  kernel_state()->xam_state()->user_tracker()->RemoveOwnedSession(
+      GetOwnerXUID(), handle());
+
+  session_id_ = -1;
 
   // Multiple sessions cause issues
   // XLiveAPI::systemlink_id = session_id_;
@@ -365,9 +395,9 @@ X_RESULT XSession::JoinSession(XGI_SESSION_MANAGE* data) {
 
   local_details_.ReturnedMemberCount = GetMembersCount();
 
-  if (!members.empty() && IsHost() && HasXboxLiveFeatureFlags()) {
-    XLiveAPI::SessionJoinRemote(session_id_, members);
-  } else if (!members.empty() && !HasOfflineFlags()) {
+  if (!members.empty() && IsHost() && IsXboxLiveSession()) {
+    kernel_state()->GetXboxLiveAPI()->SessionJoinRemote(session_id_, members);
+  } else if (!members.empty() && !IsOfflineSession()) {
     // To improve XNetInAddrToXnAddr stability each members session id
     // must match host. This is a workaround and should be fixed properly.
     //
@@ -376,10 +406,10 @@ X_RESULT XSession::JoinSession(XGI_SESSION_MANAGE* data) {
     const auto keys = std::views::keys(members);
     std::set<uint64_t> xuids{keys.begin(), keys.end()};
 
-    XLiveAPI::SessionPreJoin(session_id_, xuids);
+    kernel_state()->GetXboxLiveAPI()->SessionPreJoin(session_id_, xuids);
   }
 
-  // XamUserAddRecentPlayer
+  // XamUserAddRecentPlayer -> XPresenceSubscribe
 
   return X_ERROR_SUCCESS;
 }
@@ -499,8 +529,8 @@ X_RESULT XSession::LeaveSession(XGI_SESSION_MANAGE* data) {
 
   local_details_.ReturnedMemberCount = GetMembersCount();
 
-  if (!xuids.empty() && IsHost() && HasXboxLiveFeatureFlags()) {
-    XLiveAPI::SessionLeaveRemote(session_id_, xuids);
+  if (!xuids.empty() && IsHost() && IsXboxLiveSession()) {
+    kernel_state()->GetXboxLiveAPI()->SessionLeaveRemote(session_id_, xuids);
   }
 
   return X_ERROR_SUCCESS;
@@ -511,14 +541,34 @@ X_RESULT XSession::ModifySession(XGI_SESSION_MODIFY* data) {
 
   XGI_SESSION_MODIFY modify = *data;
 
-  if (IsValidModifyFlags(data->flags)) {
-    PrintSessionType(static_cast<SessionFlags>((uint32_t)data->flags));
-
-    local_details_.Flags = data->flags;
-  } else {
-    modify.flags = local_details_.Flags;
-    XELOGI("{}: Invalid Flags!", __func__);
+  // Mutually exclusive
+  if (data->flags & JOIN_VIA_PRESENCE_DISABLED &&
+      data->flags & JOIN_VIA_PRESENCE_FRIENDS_ONLY) {
+    return X_ERROR_INVALID_PARAMETER;
   }
+
+  const uint32_t modifiable = X_SESSION_CREATE_MODIFIERS_MASK | ARBITRATION;
+  uint32_t modifiers = data->flags & modifiable;
+
+  // If RegisterArbitration is already completed then arbitration flag cannot be
+  // removed.
+  bool is_arbitration_registered =
+      static_cast<uint32_t>(local_details_.eState) &
+      static_cast<uint32_t>(XSESSION_STATE::REGISTRATION);
+
+  // If session is ranked then modify cannot remove arbitration flag, otherwise
+  // standard/unranked sessions can modify this flag before RegisterArbitration.
+  if (!(modifiers & ARBITRATION) &&
+      (!local_details_.GameType || is_arbitration_registered)) {
+    modifiers |= ARBITRATION;
+  }
+
+  local_details_.Flags &= ~modifiable;
+  local_details_.Flags |= modifiers;
+
+  modify.flags = local_details_.Flags;
+
+  PrintSessionType(static_cast<SessionFlags>(local_details_.Flags.get()));
 
   const uint32_t num_private_slots = std::max<int32_t>(
       0, local_details_.MaxPrivateSlots - local_details_.AvailablePrivateSlots);
@@ -539,8 +589,8 @@ X_RESULT XSession::ModifySession(XGI_SESSION_MODIFY* data) {
 
   PrintSessionDetails();
 
-  if (IsHost() && HasXboxLiveFeatureFlags()) {
-    XLiveAPI::SessionModify(session_id_, &modify);
+  if (IsHost() && IsXboxLiveSession()) {
+    kernel_state()->GetXboxLiveAPI()->SessionModify(session_id_, &modify);
   }
 
   return X_ERROR_SUCCESS;
@@ -549,33 +599,43 @@ X_RESULT XSession::ModifySession(XGI_SESSION_MODIFY* data) {
 X_RESULT XSession::GetSessionDetails(XGI_SESSION_DETAILS* data) {
   // 4E4D085C checks ReturnedMemberCount when creating a session
 
-  auto local_details_ptr =
+  XSESSION_LOCAL_DETAILS* local_details_ptr =
       kernel_state_->memory()->TranslateVirtual<XSESSION_LOCAL_DETAILS*>(
           data->session_details_ptr);
 
-  local_details_ptr->SessionMembers_ptr =
-      kernel_state_->memory()->SystemHeapAlloc(sizeof(XSESSION_MEMBER) *
-                                               GetMembersCount());
+  std::memcpy(local_details_ptr, &local_details_,
+              sizeof(XSESSION_LOCAL_DETAILS));
 
-  local_details_.SessionMembers_ptr = local_details_ptr->SessionMembers_ptr;
+  const uint32_t buffer_size =
+      *kernel_state_->memory()->TranslateVirtual<xe::be<uint32_t>*>(
+          data->details_buffer_size);
+
+  const uint32_t members_count =
+      (buffer_size - sizeof(XSESSION_LOCAL_DETAILS)) / sizeof(XSESSION_MEMBER);
 
   XSESSION_MEMBER* members_ptr =
-      kernel_state_->memory()->TranslateVirtual<XSESSION_MEMBER*>(
-          local_details_ptr->SessionMembers_ptr);
+      reinterpret_cast<XSESSION_MEMBER*>(local_details_ptr + 1);
 
-  uint32_t index = 0;
+  local_details_ptr->SessionMembers_ptr =
+      kernel_state()->memory()->HostToGuestVirtual(
+          std::to_address(members_ptr));
 
-  for (auto const& [xuid, member] : local_members_) {
-    members_ptr[index] = member;
-    index++;
+  std::vector<XSESSION_MEMBER> all_members = {};
+
+  std::ranges::transform(local_members_, std::back_inserter(all_members),
+                         &std::pair<const uint64_t, XSESSION_MEMBER>::second);
+
+  std::ranges::transform(remote_members_, std::back_inserter(all_members),
+                         &std::pair<const uint64_t, XSESSION_MEMBER>::second);
+
+  const auto members = all_members | std::views::take(members_count);
+
+  for (uint32_t i = 0; const auto& member : members) {
+    members_ptr[i] = member;
+    i++;
   }
 
-  for (auto const& [xuid, member] : remote_members_) {
-    members_ptr[index] = member;
-    index++;
-  }
-
-  memcpy(local_details_ptr, &local_details_, sizeof(XSESSION_LOCAL_DETAILS));
+  assert_false(all_members.size() > members_count);
 
   PrintSessionDetails();
 
@@ -587,12 +647,15 @@ X_RESULT XSession::MigrateHost(XGI_SESSION_MIGRATE* data) {
       kernel_state_->memory()->TranslateVirtual<XSESSION_INFO*>(
           data->session_info_ptr);
 
-  if (!XLiveAPI::upnp_handler->is_active()) {
+  const auto upnp = kernel_state()->emulator()->GetUPnP();
+
+  if (upnp && !upnp->IsActive()) {
     XELOGI("Migrating without UPnP");
     // return X_E_FAIL;
   }
 
-  const auto result = XLiveAPI::XSessionMigration(session_id_, data);
+  const auto result =
+      kernel_state()->GetXboxLiveAPI()->XSessionMigration(session_id_, data);
 
   if (!result->SessionID_UInt()) {
     XELOGI("Session Migration Failed");
@@ -602,12 +665,10 @@ X_RESULT XSession::MigrateHost(XGI_SESSION_MIGRATE* data) {
   }
 
   if (data->user_index == XUserIndexNone) {
-    XELOGI("Session migration we're not host!");
-  }
-
-  if (kernel_state()->xam_state()->IsUserSignedIn(data->user_index)) {
-    // Update properties, what if they're changed after migration?
-    XLiveAPI::SessionPropertiesSet(result->SessionID_UInt(), data->user_index);
+    XELOGI("Session migration we are not host.");
+  } else {
+    XELOGI("Session migration we are new host.");
+    state_ |= STATE_FLAGS_HOST;
   }
 
   memset(SessionInfo_ptr, 0, sizeof(XSESSION_INFO));
@@ -619,7 +680,6 @@ X_RESULT XSession::MigrateHost(XGI_SESSION_MIGRATE* data) {
   // Update session id to migrated session id
   session_id_ = result->SessionID_UInt();
 
-  state_ |= STATE_FLAGS_HOST;
   state_ |= STATE_FLAGS_MIGRATED;
 
   local_details_.UserIndexHost = data->user_index;
@@ -629,14 +689,13 @@ X_RESULT XSession::MigrateHost(XGI_SESSION_MIGRATE* data) {
   return X_ERROR_SUCCESS;
 }
 
-// Server dependancy can be removed if we calculate remote machine id from
-// remote mac address.
 X_RESULT XSession::RegisterArbitration(XGI_SESSION_ARBITRATION* data) {
   XSESSION_REGISTRATION_RESULTS* results_ptr =
       kernel_state_->memory()->TranslateVirtual<XSESSION_REGISTRATION_RESULTS*>(
           data->results_ptr);
 
-  const auto result = XLiveAPI::XSessionArbitration(session_id_);
+  const auto result =
+      kernel_state()->GetXboxLiveAPI()->XSessionArbitration(session_id_);
 
   const uint32_t registrants_ptr =
       kernel_state_->memory()->SystemHeapAlloc(static_cast<uint32_t>(
@@ -684,10 +743,34 @@ X_RESULT XSession::ModifySkill(XGI_SESSION_MODIFYSKILL* data) {
       kernel_state_->memory()->TranslateVirtual<xe::be<uint64_t>*>(
           data->xuid_array_ptr);
 
-  for (uint32_t i = 0; i < data->array_count; i++) {
-    const auto& xuid = xuid_array[i];
+  const bool is_matchmaking_session = HasSessionFlag(
+      static_cast<SessionFlags>((uint32_t)local_details_.Flags), MATCHMAKING);
 
-    XELOGI("ModifySkill XUID: {:016X}", xuid.get());
+  if (!is_matchmaking_session) {
+    return X_ONLINE_E_SESSION_INVALID_FLAGS;
+  }
+
+  const uint32_t game_mode = local_details_.GameMode;
+  const uint32_t game_type = local_details_.GameType;
+  const uint32_t skill_view_id =
+      xam::GetSkillLeaderboardId(game_type, game_mode);
+
+  X_USER_STATS_SPEC spec = {};
+
+  spec.view_id = skill_view_id;
+  spec.num_column_ids = 2;
+  spec.column_ids[0] = X_STATS_COLUMN_SKILL_MU;
+  spec.column_ids[1] = X_STATS_COLUMN_SKILL_SIGMA;
+
+  // XUserReadStats(0, data->array_count, data->xuid_array_ptr, 1, spec,
+  //                results_size, results_ptr, nullptr);
+
+  // TODO: Calculate aggregate skill from skill leaderboard results
+
+  for (uint32_t i = 0; i < data->array_count; i++) {
+    const uint64_t xuid = xuid_array[i];
+
+    XELOGI("ModifySkill XUID: {:016X}", xuid);
   }
 
   return X_ERROR_SUCCESS;
@@ -710,12 +793,162 @@ X_RESULT XSession::WriteStats(XGI_STATS_WRITE* data) {
     return X_ERROR_SUCCESS;
   }
 
-  XLiveAPI::SessionWriteStats(session_id_, *data);
+  const uint64_t xuid = data->xuid;
+
+  if (!data->xuid) {
+    // TODO: How does TrueSkill system overrides work?
+    //
+    // XPROPERTY_SESSION_SKILL_DRAW_PROBABILITY
+    // XPROPERTY_SESSION_SKILL_BETA
+    // XPROPERTY_SESSION_SKILL_TAU
+
+    XELOGI("{}: TrueSkill System Overrides", __func__);
+    assert_always();
+    return X_ERROR_SUCCESS;
+  }
+
+  const bool is_arbitrated_session = HasSessionFlag(
+      static_cast<SessionFlags>((uint32_t)local_details_.Flags), ARBITRATION);
+
+  const XSESSION_VIEW_PROPERTIES* views_properties_ptr =
+      kernel_state()->memory()->TranslateVirtual<XSESSION_VIEW_PROPERTIES*>(
+          data->views_ptr);
+
+  assert_false(data->num_views > X_STATS_MAX_VIEWS);
+
+  const uint32_t view_properties_count =
+      std::min<uint32_t>(data->num_views, X_STATS_MAX_VIEWS);
+
+  const std::vector<XSESSION_VIEW_PROPERTIES> views_properties(
+      views_properties_ptr, views_properties_ptr + view_properties_count);
+
+  for (const auto& view : views_properties) {
+    const uint32_t view_id = view.view_id;
+
+    const auto spa_stats_view =
+        emulator()->game_info_database()->GetStatsView(view_id);
+
+    // TrueSkill leaderboards are not defined in SPA?
+    // 41560834 includes invalid leaderboards?
+    if (!IsTrueSkillViewID(view_id) && !spa_stats_view.has_value()) {
+      XELOGI("{} invalid leaderboard view id {:08X}", __func__, view_id);
+      return X_ONLINE_E_STAT_INVALID_TITLE_OR_LEADERBOARD;
+    }
+
+    if (spa_stats_view.has_value()) {
+      const auto& stats_view = spa_stats_view.value();
+
+      // If session attempts to write arbitrated leaderboards from a
+      // non-arbitrated session, then XSessionWriteStats will fail.
+      if (stats_view.view.arbitrated && !is_arbitrated_session) {
+        XELOGI("{} requires session arbitration", __func__);
+        return X_ONLINE_E_SESSION_REQUIRES_ARBITRATION;
+      }
+    }
+
+    // Only assume a leaderboard is arbitrated if it's skilled and not found
+    // in SPA.
+    if (IsTrueSkillViewID(view_id) && !is_arbitrated_session &&
+        !spa_stats_view.has_value()) {
+      XELOGI("{} requires session arbitration", __func__);
+      return X_ONLINE_E_SESSION_REQUIRES_ARBITRATION;
+    }
+
+    const xam::XUSER_PROPERTY* properties_ptr =
+        kernel_state()->memory()->TranslateVirtual<xam::XUSER_PROPERTY*>(
+            view.properties_ptr);
+
+    assert_false(view.properties_count > X_STATS_MAX_PROPERTIES_IN_VIEW);
+
+    const uint32_t properties_count = std::min<uint32_t>(
+        view.properties_count, X_STATS_MAX_PROPERTIES_IN_VIEW);
+
+    const std::vector<xam::XUSER_PROPERTY> properties(
+        properties_ptr, properties_ptr + properties_count);
+
+    for (const auto& property_info : properties) {
+      const uint32_t property_id = property_info.property_id;
+      const uint8_t* data_ptr =
+          reinterpret_cast<const uint8_t*>(&property_info.data.data);
+
+      const uint32_t property_data_size =
+          xam::UserData::get_valid_data_size(property_id, 0);
+
+      const xam::Property property = xam::Property(
+          property_id, property_data_size, const_cast<uint8_t*>(data_ptr));
+
+      cached_stats_properties_[xuid][view_id][property_id] = property;
+    }
+  }
+
+  return X_ERROR_SUCCESS;
+}
+
+// Flush cached leaderboard stats to the backend
+X_RESULT XSession::FlushStats() {
+  if (!HasSessionFlag(static_cast<SessionFlags>((uint32_t)local_details_.Flags),
+                      STATS)) {
+    XELOGW("Session does not support stats.");
+    return X_ONLINE_E_SESSION_WRONG_STATE;
+  }
+
+  if (local_details_.eState != XSESSION_STATE::INGAME) {
+    XELOGW("Flushing stats outside of gameplay.");
+    return X_ONLINE_E_SESSION_WRONG_STATE;
+  }
+
+  const bool is_arbitrated = HasSessionFlag(
+      static_cast<SessionFlags>((uint32_t)local_details_.Flags), ARBITRATION);
+
+  view_properties_unordered_map stats_to_flush = {};
+
+  for (const auto& [xuid, views] : cached_stats_properties_) {
+    for (const auto& [view_id, view] : views) {
+      const auto spa_stats_view =
+          emulator()->game_info_database()->GetStatsView(view_id);
+
+      if (is_arbitrated) {
+        const bool is_view_arbitrated = spa_stats_view.has_value() &&
+                                        spa_stats_view.value().view.arbitrated;
+
+        // Flush only non-arbitrated and non-skilled leaderboards
+        if (!IsTrueSkillViewID(view_id) && !is_view_arbitrated) {
+          stats_to_flush[xuid][view_id] = view;
+        }
+      } else {
+        // Flush only non-skilled leaderboards
+        if (!IsTrueSkillViewID(view_id)) {
+          stats_to_flush[xuid][view_id] = view;
+        }
+      }
+    }
+  }
+
+  // TODO: Check who flushes stats each peer or just host?
+  if (IsHost()) {
+    const bool flushed = kernel_state()->GetXboxLiveAPI()->SessionFlushStats(
+        session_id_, stats_to_flush);
+
+    // If flush is successful then remove cached stats
+    if (flushed) {
+      for (const auto& [xuid, views] : stats_to_flush) {
+        for (const auto& [view_id, view] : views) {
+          cached_stats_properties_.erase(xuid);
+        }
+      }
+    }
+  }
 
   return X_ERROR_SUCCESS;
 }
 
 X_RESULT XSession::StartSession(XGI_SESSION_STATE* state) {
+  const auto profile = kernel_state()->xam_state()->GetUserProfile(owner_xuid_);
+
+  if (IsXboxLiveSession() && !profile->IsSignedInToLive()) {
+    return X_ONLINE_E_SESSION_NOT_LOGGED_ON;
+  }
+
   local_details_.eState = XSESSION_STATE::INGAME;
 
   return X_ERROR_SUCCESS;
@@ -723,6 +956,21 @@ X_RESULT XSession::StartSession(XGI_SESSION_STATE* state) {
 
 X_RESULT XSession::EndSession(XGI_SESSION_STATE* state) {
   local_details_.eState = XSESSION_STATE::REPORTING;
+
+  const bool stats_enabled = HasSessionFlag(
+      static_cast<SessionFlags>((uint32_t)local_details_.Flags), STATS);
+
+  // The host will report TrueSkill statistics for all players in a session?
+
+  // Post the remaining cached stats
+  if (stats_enabled) {
+    const bool flushed = kernel_state()->GetXboxLiveAPI()->SessionFlushStats(
+        session_id_, cached_stats_properties_);
+
+    if (flushed) {
+      cached_stats_properties_.clear();
+    }
+  }
 
   return X_ERROR_SUCCESS;
 }
@@ -736,7 +984,15 @@ X_RESULT XSession::GetSessions(KernelState* kernel_state,
     return X_ONLINE_E_SESSION_INSUFFICIENT_BUFFER;
   }
 
-  const auto sessions = XLiveAPI::SessionSearch(search_data, num_users);
+  const auto profile =
+      kernel_state->xam_state()->GetUserProfile(search_data->user_index);
+
+  if (!profile->IsSignedInToLive()) {
+    return X_ONLINE_E_SESSION_NOT_LOGGED_ON;
+  }
+
+  const auto sessions =
+      kernel_state->GetXboxLiveAPI()->SessionSearch(search_data, num_users);
 
   const uint32_t session_count = std::min<int32_t>(
       search_data->num_results, static_cast<uint32_t>(sessions.size()));
@@ -754,7 +1010,7 @@ X_RESULT XSession::GetSessions(KernelState* kernel_state,
     session_ids_ptr[i] = id;
   }
 
-  GetSessionByIDs(kernel_state->memory(), session_ids_ptr, session_count,
+  GetSessionByIDs(kernel_state, session_ids_ptr, session_count,
                   search_data->search_results_ptr,
                   search_data->results_buffer_size);
 
@@ -776,12 +1032,41 @@ X_RESULT XSession::GetSessions(KernelState* kernel_state,
     matchmaking_query = kernel_state->emulator()
                             ->game_info_database()
                             ->GetXLast()
-                            ->GetMatchmakingQuery(search_data->proc_index);
+                            ->GetMatchmakingQuery();
 
-    if (matchmaking_query) {
-      XELOGI("Matchmaking Query Name: {}", matchmaking_query->GetName());
+    const auto paramaters =
+        matchmaking_query->GetParameters(search_data->proc_index);
+    const auto filters_left =
+        matchmaking_query->GetFiltersLeft(search_data->proc_index);
+    const auto filters_right =
+        matchmaking_query->GetFiltersRight(search_data->proc_index);
+    const auto returns = matchmaking_query->GetReturns(search_data->proc_index);
+
+    XELOGI("Matchmaking Query Name: {}",
+           matchmaking_query->GetName(search_data->proc_index));
+
+    for (uint32_t i = 0; i < search_data->num_ctx; i++) {
+      xam::XUSER_CONTEXT& context = search_contexts_ptr[i];
+
+      auto user =
+          kernel_state->xam_state()->GetUserProfile(search_data->user_index);
+
+      std::u16string context_desc =
+          kernel_state->xam_state()->user_tracker()->GetContextDescription(
+              user->xuid(), context.context_id);
+
+      XELOGD(xe::to_utf8(context_desc));
     }
 
+    for (uint32_t i = 0; i < search_data->num_props; i++) {
+      xam::XUSER_PROPERTY& property = search_properties_ptr[i];
+
+      std::u16string property_desc =
+          kernel_state->xam_state()->user_tracker()->GetPropertyDescription(
+              property.property_id);
+
+      XELOGD(xe::to_utf8(property_desc));
+    }
   }
 
   for (uint32_t i = 0; i < session_count; i++) {
@@ -789,7 +1074,8 @@ X_RESULT XSession::GetSessions(KernelState* kernel_state,
     std::vector<xam::Property> properties = {};
 
     const auto all_properties =
-        XLiveAPI::SessionPropertiesGet(sessions.at(i)->SessionID_UInt());
+        kernel_state->GetXboxLiveAPI()->SessionPropertiesGet(
+            sessions.at(i)->SessionID_UInt());
 
     for (const auto& property : all_properties) {
       if (property.IsContext()) {
@@ -837,7 +1123,7 @@ X_RESULT XSession::GetWeightedSessions(
   return GetSessions(kernel_state, &search_data, num_users);
 }
 
-X_RESULT XSession::GetSessionByID(Memory* memory,
+X_RESULT XSession::GetSessionByID(KernelState* kernel_state,
                                   XGI_SESSION_SEARCH_BYID* search_data) {
   if (!search_data->results_buffer_size) {
     search_data->results_buffer_size = sizeof(XSESSION_SEARCHRESULT);
@@ -851,14 +1137,14 @@ X_RESULT XSession::GetSessionByID(Memory* memory,
 
   const uint32_t session_count = 1;
 
-  GetSessionByIDs(memory, &search_data->session_id, session_count,
+  GetSessionByIDs(kernel_state, &search_data->session_id, session_count,
                   search_data->search_results_ptr,
                   search_data->results_buffer_size);
 
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT XSession::GetSessionByIDs(Memory* memory,
+X_RESULT XSession::GetSessionByIDs(KernelState* kernel_state,
                                    XGI_SESSION_SEARCH_BYIDS* search_data) {
   if (!search_data->results_buffer_size) {
     search_data->results_buffer_size =
@@ -876,47 +1162,46 @@ X_RESULT XSession::GetSessionByIDs(Memory* memory,
     return X_ERROR_INVALID_PARAMETER;
   }
 
-  XNKID* session_ids_ptr =
-      memory->TranslateVirtual<XNKID*>(search_data->session_ids_ptr);
+  XNKID* session_ids_ptr = kernel_state->memory()->TranslateVirtual<XNKID*>(
+      search_data->session_ids_ptr);
 
-  GetSessionByIDs(memory, session_ids_ptr, search_data->num_session_ids,
+  GetSessionByIDs(kernel_state, session_ids_ptr, search_data->num_session_ids,
                   search_data->search_results_ptr,
                   search_data->results_buffer_size);
 
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT XSession::GetSessionByIDs(Memory* memory, XNKID* session_ids_ptr,
+X_RESULT XSession::GetSessionByIDs(KernelState* kernel_state,
+                                   XNKID* session_ids_ptr,
                                    uint32_t num_session_ids,
                                    uint32_t search_results_ptr,
                                    uint32_t results_buffer_size) {
   SEARCH_RESULTS* search_results =
-      memory->TranslateVirtual<SEARCH_RESULTS*>(search_results_ptr);
+      kernel_state->memory()->TranslateVirtual<SEARCH_RESULTS*>(
+          search_results_ptr);
 
-  const uint32_t session_search_result_ptr =
-      memory->SystemHeapAlloc(results_buffer_size);
+  std::memset(search_results, 0, results_buffer_size);
 
   search_results->results_ptr =
-      memory->TranslateVirtual<XSESSION_SEARCHRESULT*>(
-          session_search_result_ptr);
+      reinterpret_cast<XSESSION_SEARCHRESULT*>(search_results + 1);
+
+  const uint32_t session_search_result_ptr =
+      kernel_state->memory()->HostToGuestVirtual(
+          std::to_address(search_results->results_ptr));
 
   uint32_t result_index = 0;
 
   for (uint32_t i = 0; i < num_session_ids; i++) {
     const xe::be<uint64_t> session_id = XNKIDtoUint64(&session_ids_ptr[i]);
 
-    if (!IsValidXNKID(session_id)) {
-      continue;
-    }
+    IsValidXNKID(session_id);
 
-    const auto session = XLiveAPI::XSessionGet(session_id);
+    const auto session =
+        kernel_state->GetXboxLiveAPI()->XSessionGet(session_id);
 
-    if (!session->HostAddress().empty()) {
-      // HUH? How it should be filled in this case?
-      FillSessionContext(memory, 0, nullptr, {}, 0, nullptr,
-                         &search_results->results_ptr[result_index]);
-      FillSessionProperties(memory, 0, nullptr, {}, 0, nullptr,
-                            &search_results->results_ptr[result_index]);
+    // Skip setting contexts and properties in such case.
+    if (!session.HostAddress().empty()) {
       FillSessionSearchResult(session,
                               &search_results->results_ptr[result_index]);
 
@@ -930,37 +1215,16 @@ X_RESULT XSession::GetSessionByIDs(Memory* memory, XNKID* session_ids_ptr,
   return X_ERROR_SUCCESS;
 }
 
-void XSession::GetXnAddrFromSessionObject(SessionObjectJSON* session,
-                                          XNADDR* XnAddr_ptr) {
-  memset(XnAddr_ptr, 0, sizeof(XNADDR));
+void XSession::FillSessionSearchResult(const SessionObjectJSON session,
+                                       XSESSION_SEARCHRESULT* result) {
+  result->filled_private_slots = session.FilledPrivateSlotsCount();
+  result->filled_public_slots = session.FilledPublicSlotsCount();
+  result->open_private_slots = session.OpenPrivateSlotsCount();
+  result->open_public_slots = session.OpenPublicSlotsCount();
 
-  // We only store online IP on server.
+  Uint64toXNKID(session.SessionID_UInt(), &result->info.sessionID);
 
-  // if (XLiveAPI::IsOnline()) {
-  // } else {
-  // }
-
-  XnAddr_ptr->inaOnline = ip_to_in_addr(session->HostAddress());
-  XnAddr_ptr->ina = ip_to_in_addr(session->HostAddress());
-
-  const MacAddress mac = MacAddress(session->MacAddress());
-
-  memcpy(&XnAddr_ptr->abEnet, mac.raw(), sizeof(MacAddress));
-
-  XnAddr_ptr->wPortOnline = session->Port();
-}
-
-void XSession::FillSessionSearchResult(
-    const std::unique_ptr<SessionObjectJSON>& session,
-    XSESSION_SEARCHRESULT* result) {
-  result->filled_private_slots = session->FilledPrivateSlotsCount();
-  result->filled_public_slots = session->FilledPublicSlotsCount();
-  result->open_private_slots = session->OpenPrivateSlotsCount();
-  result->open_public_slots = session->OpenPublicSlotsCount();
-
-  Uint64toXNKID(session->SessionID_UInt(), &result->info.sessionID);
-
-  GetXnAddrFromSessionObject(session.get(), &result->info.hostAddress);
+  XLiveAPI::GetXnAddrFromSessionObject(session, &result->info.hostAddress);
 
   GenerateIdentityExchangeKey(&result->info.keyExchangeKey);
 }
@@ -971,9 +1235,12 @@ void XSession::FillSessionContext(
     std::vector<xam::Property> contexts, uint32_t filter_contexts_count,
     xam::XUSER_CONTEXT* filter_contexts_ptr, XSESSION_SEARCHRESULT* result) {
   if (matchmaking_query) {
-    const auto paramaters = matchmaking_query->GetParameters();
-    const auto filters = matchmaking_query->GetFilters();
-    const auto returns = matchmaking_query->GetReturns();
+    const auto paramaters = matchmaking_query->GetParameters(matchmaking_index);
+    const auto filters_left =
+        matchmaking_query->GetFiltersLeft(matchmaking_index);
+    const auto filters_right =
+        matchmaking_query->GetFiltersRight(matchmaking_index);
+    const auto returns = matchmaking_query->GetReturns(matchmaking_index);
   }
 
   result->contexts_count = static_cast<uint32_t>(contexts.size());
@@ -1004,9 +1271,12 @@ void XSession::FillSessionProperties(
     std::vector<xam::Property> properties, uint32_t filter_properties_count,
     xam::XUSER_PROPERTY* filter_properties_ptr, XSESSION_SEARCHRESULT* result) {
   if (matchmaking_query) {
-    const auto paramaters = matchmaking_query->GetParameters();
-    const auto filters = matchmaking_query->GetFilters();
-    const auto returns = matchmaking_query->GetReturns();
+    const auto paramaters = matchmaking_query->GetParameters(matchmaking_index);
+    const auto filters_left =
+        matchmaking_query->GetFiltersLeft(matchmaking_index);
+    const auto filters_right =
+        matchmaking_query->GetFiltersRight(matchmaking_index);
+    const auto returns = matchmaking_query->GetReturns(matchmaking_index);
   }
 
   result->properties_count = static_cast<uint32_t>(properties.size());
@@ -1033,6 +1303,69 @@ void XSession::FillSessionProperties(
   }
 
   result->properties_ptr = properties_ptr;
+}
+
+bool XSession::IsPresenceEnabled() const {
+  return local_details_.Flags & PRESENCE;
+}
+
+bool XSession::IsJoinViaPresenceEnabled() const {
+  return !(local_details_.Flags & JOIN_VIA_PRESENCE_DISABLED);
+}
+
+bool XSession::IsJoinViaPresenceFriendsOnly() const {
+  return local_details_.Flags & JOIN_VIA_PRESENCE_FRIENDS_ONLY;
+}
+
+bool XSession::IsJoinInProgressEnabled() const {
+  return !(local_details_.Flags & JOIN_IN_PROGRESS_DISABLED);
+}
+
+bool XSession::IsInvitesEnabled() const {
+  return !(local_details_.Flags & INVITES_DISABLED);
+}
+
+bool XSession::IsSessionStarted() const {
+  return static_cast<uint32_t>(local_details_.eState) &
+         static_cast<uint32_t>(XSESSION_STATE::INGAME);
+}
+
+bool XSession::IsSessionEnded() const {
+  return static_cast<uint32_t>(local_details_.eState) &
+         static_cast<uint32_t>(XSESSION_STATE::REPORTING);
+}
+
+void XSession::NotifySessionCreationWarning(uint32_t user_index) const {
+  const xam::UserProfile* user_profile =
+      kernel_state_->xam_state()->GetUserProfile(user_index);
+
+  if (user_profile) {
+    const uint8_t user_slot =
+        kernel_state_->xam_state()
+            ->profile_manager()
+            ->GetUserIndexAssignedToProfile(user_profile->xuid());
+
+    if (user_slot > 0) {
+      const auto profile =
+          kernel_state()->xam_state()->profile_manager()->GetProfile(
+              uint8_t(0));
+
+      std::string warning_msg =
+          "Currently only profile slot 1 is allowed to host Xbox Live "
+          "sessions!";
+
+      if (profile) {
+        warning_msg = fmt::format(
+            "Currently only profile slot 1 (signed in as {}) is allowed to "
+            "host Xbox Live sessions!",
+            profile->name());
+      }
+
+      new xe::ui::HostNotificationWindow(
+          kernel_state()->emulator()->imgui_drawer(),
+          "Session Creation Warning!", warning_msg, 0, 9);
+    }
+  }
 }
 
 void XSession::PrintSessionDetails() {
@@ -1109,7 +1442,8 @@ void XSession::PrintSessionType(SessionFlags flags) {
       {INVITES_DISABLED, "No invites"},
       {JOIN_VIA_PRESENCE_DISABLED, "Presence Join Disabled"},
       {JOIN_IN_PROGRESS_DISABLED, "In-Progress Join Disabled"},
-      {JOIN_VIA_PRESENCE_FRIENDS_ONLY, "Friends Only"}};
+      {JOIN_VIA_PRESENCE_FRIENDS_ONLY, "Friends Only"},
+      {UNKNOWN, "Unknown Flag 0x1000"}};
 
   const std::map<SessionFlags, std::string> extended = {
       {SINGLEPLAYER_WITH_STATS, "Singleplayer with Stats"},

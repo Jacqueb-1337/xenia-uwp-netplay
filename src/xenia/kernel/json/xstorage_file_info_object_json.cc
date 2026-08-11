@@ -92,7 +92,7 @@ bool XStorageFilesInfoObjectJSON::Deserialize(const rapidjson::Value& obj) {
     if (obj["items"].IsArray()) {
       for (const auto& FileInfoObj : obj["items"].GetArray()) {
         XStorageFileInfoObjectJSON* FileInfo = new XStorageFileInfoObjectJSON();
-    FileInfo->Deserialize(FileInfoObj);
+        FileInfo->Deserialize(FileInfoObj.GetObj());
 
         items.push_back(*FileInfo);
       }

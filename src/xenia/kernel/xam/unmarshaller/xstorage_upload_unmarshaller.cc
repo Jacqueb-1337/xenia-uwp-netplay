@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2025 Xenia Canary. All rights reserved.                          *
+ * Copyright 2026 Xenia Canary. All rights reserved.                          *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -14,25 +14,20 @@ namespace kernel {
 namespace xam {
 
 XStorageUploadToMemoryUnmarshaller::XStorageUploadToMemoryUnmarshaller(
-    uint32_t marshaller_address)
-    : Unmarshaller(marshaller_address),
-      user_index_(0),
-      server_path_len_(0),
-      server_path_(u""),
-      buffer_size_(0),
-      upload_buffer_address_(0) {}
+    KernelState* kernel_state, uint32_t marshaller_address)
+    : Unmarshaller(kernel_state, marshaller_address) {}
 
 X_HRESULT XStorageUploadToMemoryUnmarshaller::Deserialize() {
   if (!GetXLiveBaseAsyncMessage()->xlive_async_task_ptr) {
     return X_E_INVALIDARG;
   }
 
-  if (!GetAsyncTask()->GetXLiveAsyncTask()->marshalled_request_ptr) {
+  if (!GetAsyncTask().GetXLiveAsyncTask()->marshalled_request_ptr) {
     return X_E_INVALIDARG;
   }
 
-  if (GetAsyncTask()->GetXLiveAsyncTask()->results_ptr ||
-      GetAsyncTask()->GetXLiveAsyncTask()->results_size) {
+  if (GetAsyncTask().GetXLiveAsyncTask()->results_ptr ||
+      GetAsyncTask().GetXLiveAsyncTask()->results_size) {
     assert_always(std::format("{} results unexpected!", __func__));
   }
 
@@ -43,7 +38,7 @@ X_HRESULT XStorageUploadToMemoryUnmarshaller::Deserialize() {
   upload_buffer_address_ = ReadSwap<uint32_t>();
 
   if (GetPosition() !=
-      GetAsyncTask()->GetXLiveAsyncTask()->marshalled_request_size) {
+      GetAsyncTask().GetXLiveAsyncTask()->marshalled_request_size) {
     assert_always(std::format("{} deserialization incomplete", __func__));
   }
 

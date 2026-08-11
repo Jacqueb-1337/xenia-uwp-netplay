@@ -106,7 +106,7 @@ bool SessionObjectJSON::Deserialize(const rapidjson::Value& obj) {
 
     for (uint8_t i = 0; i < playersArray.Size(); i++) {
       PlayerObjectJSON player = PlayerObjectJSON();
-    player.Deserialize(playersArray[i]);
+      player.Deserialize(playersArray[i].GetObj());
 
       players.push_back(player);
     }

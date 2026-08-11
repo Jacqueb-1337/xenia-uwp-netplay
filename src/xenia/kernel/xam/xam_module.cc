@@ -86,11 +86,9 @@ void XamModule::LoadLoaderData() {
   FILE* file = xe::filesystem::OpenFile(loader_data_path, "rb");
 
   if (!file) {
-    loader_data_.launch_data_present = false;
+    loader_data_.launch_data.clear();
     return;
   }
-
-  loader_data_.launch_data_present = true;
 
   auto string_read = [file]() {
     uint16_t string_size = 0;
@@ -131,7 +129,8 @@ void XamModule::SaveLoaderData() {
   std::string launch_path = loader_data_.launch_path;
 
   auto remove_prefix = [&launch_path](std::string_view prefix) {
-    if (launch_path.compare(0, prefix.length(), prefix) == 0) {
+    if (xe::utf8::lower_ascii(launch_path)
+            .starts_with(xe::utf8::lower_ascii(prefix))) {
       launch_path = launch_path.substr(prefix.length());
     }
   };

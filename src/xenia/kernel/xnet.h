@@ -13,28 +13,33 @@
 #include <random>
 
 #include "xenia/base/byte_order.h"
+#include "xenia/base/literals.h"
 #include "xenia/kernel/util/xfiletime.h"
-#include "xenia/kernel/xam/user_data.h"
+#include "xenia/kernel/xam/user_property.h"
 
 #ifdef XE_PLATFORM_WIN32
-#define _WINSOCK_DEPRECATED_NO_WARNINGS  // inet_addr
 // clang-format off
 #include "xenia/base/platform_win.h"
 // clang-format on
 #include <inaddr.h>
 #include <winapifamily.h>
+#elif XE_PLATFORM_LINUX
+#include <netinet/ip.h>
 #endif
 
 namespace xe {
+using namespace xe::literals;
 
 // clang-format off
 
 // https://github.com/davispuh/XLiveServices/blob/master/lib/xlive_services/hresult.rb
 
-#define X_ONLINE_E_LOGON_NOT_LOGGED_ON                      static_cast<X_HRESULT>(0x80151802L) // ERROR_SERVICE_NOT_FOUND
-#define X_ONLINE_E_LOGON_SERVICE_TEMPORARILY_UNAVAILABLE    static_cast<X_HRESULT>(0x80151102L) // ERROR_CONNECTION_INVALID
-#define X_ONLINE_E_LOGON_SERVICE_NOT_REQUESTED              static_cast<X_HRESULT>(0x80151100L) // ERROR_SERVICE_SPECIFIC_ERROR
+#define X_ONLINE_E_BASE                                     static_cast<X_HRESULT>(0x80150000L)
+
+#define X_ONLINE_E_LOGON_NOT_LOGGED_ON                      static_cast<X_HRESULT>(0x80151802L) // ERROR_CONNECTION_INVALID
+#define X_ONLINE_E_LOGON_SERVICE_NOT_REQUESTED              static_cast<X_HRESULT>(0x80151100L) // ERROR_SERVICE_NOT_FOUND
 #define X_ONLINE_E_LOGON_LOGON_SERVICE_NOT_AUTHORIZED       static_cast<X_HRESULT>(0x80151101L) // ERROR_NOT_AUTHENTICATED
+#define X_ONLINE_E_LOGON_SERVICE_TEMPORARILY_UNAVAILABLE    static_cast<X_HRESULT>(0x80151102L)
 #define X_ONLINE_E_LOGON_NO_NETWORK_CONNECTION              static_cast<X_HRESULT>(0x80151000L)
 #define X_ONLINE_S_LOGON_CONNECTION_ESTABLISHED             static_cast<X_HRESULT>(0x001510F0L)
 #define X_ONLINE_S_LOGON_DISCONNECTED                       static_cast<X_HRESULT>(0x001510F1L)
@@ -43,6 +48,7 @@ namespace xe {
 #define X_ONLINE_E_SESSION_INSUFFICIENT_BUFFER              static_cast<X_HRESULT>(0x80155207L)
 #define X_ONLINE_E_SESSION_JOIN_ILLEGAL                     static_cast<X_HRESULT>(0x8015520AL)
 #define X_ONLINE_E_SESSION_NOT_FOUND                        static_cast<X_HRESULT>(0x80155200L)
+#define X_ONLINE_E_SESSION_INVALID_FLAGS                    static_cast<X_HRESULT>(0x80155204L)
 #define X_ONLINE_E_SESSION_REQUIRES_ARBITRATION             static_cast<X_HRESULT>(0x80155205L)
 #define X_ONLINE_E_SESSION_NOT_LOGGED_ON                    static_cast<X_HRESULT>(0x80155209L)
 #define X_ONLINE_E_SESSION_FULL                             static_cast<X_HRESULT>(0x80155202L)
@@ -58,7 +64,13 @@ namespace xe {
 #define X_ONLINE_E_ACCESS_DENIED                            static_cast<X_HRESULT>(0x80150016L)
 #define X_ONLINE_E_ACCOUNTS_USER_OPTED_OUT                  static_cast<X_HRESULT>(0x80154099L)
 #define X_ONLINE_E_ACCOUNTS_USER_GET_ACCOUNT_INFO_ERROR     static_cast<X_HRESULT>(0x80154098L)
-#define X_E_INSUFFICIENT_BUFFER                             static_cast<X_HRESULT>(0x8007007AL)
+#define X_ONLINE_E_NOTIFICATION_TOO_MANY_SUBS               static_cast<X_HRESULT>(0x8015200EL)
+#define X_ONLINE_E_STAT_INVALID_TITLE_OR_LEADERBOARD        static_cast<X_HRESULT>(0x80159002L)
+#define X_ONLINE_E_STAT_USER_NOT_FOUND                      static_cast<X_HRESULT>(0x80159003L)
+#define X_ONLINE_E_STAT_TOO_MANY_SPECS                      static_cast<X_HRESULT>(0x80159004L)
+#define X_ONLINE_E_STAT_TOO_MANY_STATS                      static_cast<X_HRESULT>(0x80159005L)
+#define X_ONLINE_E_STAT_INVALID_ATTACHMENT                  static_cast<X_HRESULT>(0x80159202L)
+#define X_ONLINE_S_STAT_CAN_UPLOAD_ATTACHMENT               static_cast<X_HRESULT>(0x00159203L)
 
 #define X_PARTY_E_NOT_IN_PARTY                              static_cast<X_HRESULT>(0x807D0003L)
 
@@ -82,15 +94,27 @@ namespace xe {
 #define X_ONLINE_FRIENDSTATE_FLAG_NONE                      0x00000000
 #define X_ONLINE_FRIENDSTATE_FLAG_ONLINE                    0x00000001
 #define X_ONLINE_FRIENDSTATE_FLAG_PLAYING                   0x00000002
+#define X_ONLINE_FRIENDSTATE_FLAG_VOICE                     0x00000008
 #define X_ONLINE_FRIENDSTATE_FLAG_JOINABLE                  0x00000010
-
-#define X_ONLINE_FRIENDSTATE_FLAG_INVITEACCEPTED            0x10000000
+#define X_ONLINE_FRIENDSTATE_MASK_GUESTS                    0x00000060
+#define X_ONLINE_FRIENDSTATE_FLAG_RESERVED0                 0x00000080
+#define X_ONLINE_FRIENDSTATE_FLAG_JOINABLE_FRIENDS_ONLY     0x00000100
 #define X_ONLINE_FRIENDSTATE_FLAG_SENTINVITE                0x04000000
+#define X_ONLINE_FRIENDSTATE_FLAG_RECEIVEDINVITE            0x08000000
+#define X_ONLINE_FRIENDSTATE_FLAG_INVITEACCEPTED            0x10000000
+#define X_ONLINE_FRIENDSTATE_FLAG_INVITEREJECTED            0x20000000
+#define X_ONLINE_FRIENDSTATE_FLAG_SENTREQUEST               0x40000000
+#define X_ONLINE_FRIENDSTATE_FLAG_RECEIVEDREQUEST           0x80000000
 
 #define X_ONLINE_FRIENDSTATE_ENUM_ONLINE                    0x00000000
 #define X_ONLINE_FRIENDSTATE_ENUM_AWAY                      0x00010000
 #define X_ONLINE_FRIENDSTATE_ENUM_BUSY                      0x00020000
 #define X_ONLINE_FRIENDSTATE_MASK_USER_STATE                0x000F0000
+#define X_ONLINE_FRIENDSTATE_ENUM_CONSOLE_XBOX1             0x00000000
+#define X_ONLINE_FRIENDSTATE_ENUM_CONSOLE_XBOX360           0x00001000
+#define X_ONLINE_FRIENDSTATE_ENUM_CONSOLE_WINPC             0x00002000
+#define X_ONLINE_FRIENDSTATE_ENUM_CONSOLE_DURANGO           0x00003000
+#define X_ONLINE_FRIENDSTATE_MASK_CONSOLE_TYPE              0x00007000
 
 #define X_ONLINE_MAX_FRIENDS                                100
 #define X_ONLINE_PEER_SUBSCRIPTIONS                         400
@@ -103,8 +127,30 @@ namespace xe {
 #define X_MAX_RICHPRESENCE_SIZE_EXTRA                       100 // 4D5308AB uses rich presence string > 64
 #define X_ONLINE_MAX_XINVITE_DISPLAY_STRING                 255
 #define X_ONLINE_MAX_STATS_ESTIMATE_RATING_COUNT            101
+#define X_ONLINE_MAX_MUSTLIST                               250
 
 #define X_PARTY_MAX_USERS                                   32
+#define X_PARTY_USER_ISLOCAL                                0x00000001
+#define X_PARTY_USER_ISINPARTYVOICE                         0x00000002
+#define X_PARTY_USER_ISTALKING                              0x00000004
+#define X_PARTY_USER_ISINGAMESESSION                        0x00000008
+
+#define X_USER_STATS_ATTRIBUTES_IN_SPEC                     64
+
+#define X_STATS_MAX_VIEWS                                   64
+#define X_STATS_MAX_PROPERTIES_IN_VIEW                      64
+#define X_STATS_MAX_USER_COUNT                              101
+#define X_STATS_MAX_ROW_COUNT                               100
+
+// System defined TrueSkill leaderboard columns
+#define X_STATS_COLUMN_SKILL_SKILL                          61
+#define X_STATS_COLUMN_SKILL_GAMESPLAYED                    62
+#define X_STATS_COLUMN_SKILL_MU                             63
+#define X_STATS_COLUMN_SKILL_SIGMA                          64
+
+#define X_STATS_SKILL_SKILL_DEFAULT                         1
+#define X_STATS_SKILL_MU_DEFAULT                            3.0
+#define X_STATS_SKILL_SIGMA_DEFAULT                         1.0
 
 #define X_MARKETPLACE_CONTENT_ID_LEN                        20
 #define X_MARKETPLACE_ASSET_SIGNATURE_SIZE                  256
@@ -115,6 +161,9 @@ namespace xe {
 
 #define X_CONTEXT_GAME_TYPE_RANKED                          0x0
 #define X_CONTEXT_GAME_TYPE_STANDARD                        0x1
+
+#define X_SESSION_CREATE_USES_MASK                          0x0000003F
+#define X_SESSION_CREATE_MODIFIERS_MASK                     0x00000F80  // Including SOCIAL_MATCHMAKING_ALLOWED
 
 #define MAX_FIRSTNAME_SIZE                                  64
 #define MAX_LASTNAME_SIZE                                   64
@@ -144,6 +193,15 @@ namespace xe {
 #define X_ONLINE_LSP_ATTRIBUTE_PARAM_USER                   0x02100004
 
 #define X_ONLINE_LSP_DEFAULT_DATASET_ID                     0xAAAA
+
+#define X_ICU_DECODE 0x10000000  // Convert %XX escape sequences to characters
+#define X_ICU_ESCAPE 0x80000000  // (un)escape URL characters
+
+#define X_TITLE_SERVER_MAX_LSP_INFO                         1000
+
+constexpr bool IsOnlineError(uint32_t error) {
+  return (error & 0xFFFF0000) == X_ONLINE_E_BASE;
+}
 
 constexpr uint32_t PropertyID(bool system_property,
                               kernel::xam::X_USER_DATA_TYPE type, uint16_t id) {
@@ -177,7 +235,7 @@ enum PropertyID : uint32_t {
   XPROPERTY_RANK =
       PropertyID(true, kernel::xam::X_USER_DATA_TYPE::INT32, 0x001), // 0x10008001
   XPROPERTY_GAMERNAME =
-      PropertyID(true, kernel::xam::X_USER_DATA_TYPE::WSTRING, 0x002), // 0x40008002
+      PropertyID(true, kernel::xam::X_USER_DATA_TYPE::WSTRING, 0x002), // 0x40008002 (Displayed in Leaderboards)
   XPROPERTY_SESSION_ID =
       PropertyID(true, kernel::xam::X_USER_DATA_TYPE::INT64, 0x003), // 0x20008003
   XPROPERTY_GAMER_ZONE =
@@ -197,7 +255,7 @@ enum PropertyID : uint32_t {
   XPROPERTY_AFFILIATE_VALUE =
       PropertyID(true, kernel::xam::X_USER_DATA_TYPE::INT64, 0x108), // 0x20008108
   XPROPERTY_GAMER_HOSTNAME =
-      PropertyID(true, kernel::xam::X_USER_DATA_TYPE::WSTRING, 0x109), // 0x40008109
+      PropertyID(true, kernel::xam::X_USER_DATA_TYPE::WSTRING, 0x109), // 0x40008109 (Displayed in XSession Search)
   XPROPERTY_PLATFORM_TYPE =
       PropertyID(true, kernel::xam::X_USER_DATA_TYPE::INT32, 0x201), // 0x10008201
   XPROPERTY_PLATFORM_LOCK =
@@ -259,14 +317,50 @@ constexpr uint16_t XNET_SYSTEMLINK_PORT = 3074;
 constexpr uint32_t XEX_PRIVILEGE_PII_ACCESS = 13;
 constexpr uint32_t XEX_PRIVILEGE_CROSSPLATFORM_SYSTEM_LINK = 14;
 
-constexpr uint8_t kXUserMaxStatsRows = 100;
+// 4D5307EA, 5841089F, 5841089F
+constexpr uint32_t RankedTrueSkillViewIdMask = 0xFFFF0000;
+constexpr uint32_t StandardTrueSkillViewIdMask = 0xFFFE0000;
 
-constexpr uint8_t kXUserMaxStatsAttributes = 64;
+constexpr uint32_t XUserMaxReadStatsSpec = 64;
 
-constexpr uint32_t kTMSUserMaxSize = 8192;          // 8 KB
-constexpr uint32_t kTMSTitleMaxSize = 1048576 * 5;  // 5 MB
-constexpr uint32_t kTMSClipMaxSize = 1048576 * 11;  // 11 MB
-constexpr uint32_t kTMSFileMaxSize = 1048576 * 20;  // 20 MB (Custom)
+inline bool IsRankedTrueSkillViewID(const uint32_t view_id) {
+  return (view_id & RankedTrueSkillViewIdMask) == RankedTrueSkillViewIdMask;
+}
+
+inline bool IsStandardTrueSkillViewID(const uint32_t view_id) {
+  return (view_id & StandardTrueSkillViewIdMask) == StandardTrueSkillViewIdMask;
+}
+
+inline bool IsTrueSkillViewID(const uint32_t view_id) {
+  return IsRankedTrueSkillViewID(view_id) || IsStandardTrueSkillViewID(view_id);
+}
+
+inline xam::X_USER_DATA_TYPE GetTrueSkillColumnType(const uint32_t column_id) {
+  switch (column_id) {
+    case X_STATS_COLUMN_SKILL_SKILL:
+      // 494707E4, 545107D1 expect INT64
+      return xam::X_USER_DATA_TYPE::INT64;
+    case X_STATS_COLUMN_SKILL_GAMESPLAYED:
+      // or INT32?
+      return xam::X_USER_DATA_TYPE::INT64;
+    case X_STATS_COLUMN_SKILL_MU:
+      return xam::X_USER_DATA_TYPE::DOUBLE;
+    case X_STATS_COLUMN_SKILL_SIGMA:
+      return xam::X_USER_DATA_TYPE::DOUBLE;
+    default:
+      return xam::X_USER_DATA_TYPE::CONTEXT;
+  }
+}
+
+// XUIDs -> Views -> Property IDs -> Property
+using view_properties_unordered_map = std::unordered_map<
+    uint64_t,
+    std::unordered_map<uint32_t, std::unordered_map<uint32_t, xam::Property>>>;
+
+constexpr size_t kTMSUserMaxSize = 8_KiB;   // 8 KB
+constexpr size_t kTMSTitleMaxSize = 5_MiB;  // 5 MB
+constexpr size_t kTMSClipMaxSize = 11_MiB;  // 11 MB
+constexpr size_t kTMSFileMaxSize = 20_MiB;  // 20 MB (Custom)
 
 enum NETWORK_MODE : uint32_t { OFFLINE, LAN, XBOXLIVE };
 
@@ -306,15 +400,83 @@ enum DMP_STATUS_TYPE : uint32_t {
   DMP_STATUS_CLOSED = 2
 };
 
+enum class X_BACKGROUND_DOWNLOAD_MODE { ALWAYS_ALLOW = 1, AUTO = 2 };
+
+enum class X_INTERNET_SCHEME : uint32_t { HTTP = 1, HTTPS = 2 };
+
+enum class X_URL_COMPONENTS {
+  Full,
+  Protocol,
+  Username,
+  Password,
+  Host,
+  Port,
+  Path,
+  Query
+};
+
+struct XONLINE_SCHEMA_DATA {
+  xe::be<uint32_t> schema_ptr;
+  xe::be<uint32_t> schema_size;
+};
+static_assert_size(XONLINE_SCHEMA_DATA, 0x8);
+
+struct XPASSPORT_MEMBERS_NAME {
+  xe::be<uint64_t> xuid_1;
+  xe::be<uint64_t> xuid_2;
+};
+static_assert_size(XPASSPORT_MEMBERS_NAME, 0x10);
+
+struct PASSPORT_GET_MEMBER_NAME_RESPONSE {
+  xe::be<uint16_t> user_pmn_length;
+  xe::be<uint32_t> wsz_user_pmn_ptr;  // char16_t*
+  xe::be<uint16_t> cid_length;
+  xe::be<uint32_t> cid_ptr;  // char16_t*
+  xe::be<uint16_t> parent_pmn_length;
+  xe::be<uint32_t> parent_pmn_ptr;  // char16_t*
+};
+static_assert_size(PASSPORT_GET_MEMBER_NAME_RESPONSE, 0x18);
+
+struct XLIVEBASE_WEBSERVICETASK_CALL {
+  xe::be<uint32_t> user_index;
+  const xe::be<uint32_t> uri;      // char*
+  const xe::be<uint32_t> verb;     // char*
+  xe::be<uint32_t> workspace_ptr;  //  uint8_t*
+  xe::be<uint32_t> workspace_size;
+  xe::be<uint32_t> flags;
+  const xe::be<uint32_t> request_struct_ptr;  //  uint8_t*
+  xe::be<uint32_t> request_struct;
+  const xe::be<uint32_t> request_filter_ptr;  // char*
+  xe::be<uint32_t> http_status_code_ptr;      // uint32_t*
+  xe::be<uint32_t> response_struct_ptr;       //  uint8_t*
+  xe::be<uint32_t> response_struct_size;
+  const xe::be<uint32_t> response_filter_ptr;       // char*
+  const xe::be<uint32_t> sts_relying_party_id_ptr;  // char*
+};
+static_assert_size(XLIVEBASE_WEBSERVICETASK_CALL, 0x38);
+
+struct XLIVEBASE_WEBSERVICETASK_GETBUFFERSIZE {
+  const xe::be<uint32_t> uri_ptr;              // char*
+  const xe::be<uint32_t> request_filter_ptr;   // char*
+  const xe::be<uint32_t> response_filter_ptr;  // char*
+  xe::be<uint32_t> flags;
+  xe::be<uint32_t> task_buffer_size_ptr;  // uint32_t*
+};
+static_assert_size(XLIVEBASE_WEBSERVICETASK_GETBUFFERSIZE, 0x14);
+
 struct XNKID {
   uint8_t ab[8];
-  uint64_t as_uint64() { return *reinterpret_cast<uint64_t*>(&ab); }
-  uint64_t as_uintBE64() { return xe::byte_swap(as_uint64()); }
+  uint64_t as_uint64() const { return *reinterpret_cast<const uint64_t*>(&ab); }
+  uint64_t as_uintBE64() const { return xe::byte_swap(as_uint64()); }
+
+  bool operator==(const XNKID&) const = default;
 };
 static_assert_size(XNKID, 0x8);
 
 struct XNKEY {
   uint8_t ab[16];
+
+  bool operator==(const XNKEY&) const = default;
 };
 static_assert_size(XNKEY, 0x10);
 
@@ -327,7 +489,23 @@ struct SGADDR {
   in_addr ina;                                  // IP address of the SG for the client
   xe::be<uint32_t> security_parameter_index;    // Pseudo-random identifier assigned by the SG
   xe::be<uint64_t> xbox_id;                     // Unique identifier of client machine account - machine id?
-  uint8_t reserved[4];
+  uint8_t platform_type;
+  uint8_t reserved[3];
+
+bool operator==(const SGADDR& other) const {
+  return std::tie(
+             ina.s_addr,
+             security_parameter_index,
+             xbox_id,
+             platform_type
+         ) ==
+         std::tie(
+             other.ina.s_addr,
+             other.security_parameter_index,
+             other.xbox_id,
+             other.platform_type
+         ) && std::equal(std::begin(reserved), std::end(reserved), std::begin(other.reserved));
+}
 };
 static_assert_size(SGADDR, 0x14);
 
@@ -342,6 +520,14 @@ struct XNADDR {
   xe::be<uint16_t> wPortOnline;  // Online port
   uint8_t abEnet[6];             // Ethernet MAC address
   SGADDR abOnline;               // Online identification
+
+  bool operator==(const XNADDR& other) const {
+    return std::tie(ina.s_addr, inaOnline.s_addr, wPortOnline, abOnline) ==
+               std::tie(other.ina.s_addr, other.inaOnline.s_addr,
+                        other.wPortOnline, other.abOnline) &&
+           std::equal(std::begin(abEnet), std::end(abEnet),
+                      std::begin(other.abEnet));
+  }
 };
 static_assert_size(XNADDR, 0x24);
 
@@ -351,6 +537,8 @@ struct XSESSION_INFO {
   XNKID sessionID;
   XNADDR hostAddress;
   XNKEY keyExchangeKey;
+
+  bool operator==(const XSESSION_INFO& rhs) const = default;
 };
 static_assert_size(XSESSION_INFO, 0x3C);
 
@@ -411,6 +599,8 @@ struct XSESSION_LOCAL_DETAILS {
   XSESSION_INFO sessionInfo;
   XNKID xnkidArbitration;
   xe::be<uint32_t> SessionMembers_ptr;
+
+  bool operator==(const XSESSION_LOCAL_DETAILS& rhs) const = default;
 };
 static_assert_size(XSESSION_LOCAL_DETAILS, 0x80);
 
@@ -429,12 +619,10 @@ struct XSESSION_MEMBER {
   xe::be<uint32_t> Flags;
 
   void SetPrivate() {
-    Flags = Flags.get() | static_cast<uint32_t>(MEMBER_FLAGS::PRIVATE_SLOT);
+    Flags |= static_cast<uint32_t>(MEMBER_FLAGS::PRIVATE_SLOT);
   }
 
-  void SetZombie() {
-    Flags = Flags.get() | static_cast<uint32_t>(MEMBER_FLAGS::ZOMBIE);
-  }
+  void SetZombie() { Flags |= static_cast<uint32_t>(MEMBER_FLAGS::ZOMBIE); }
 
   const bool IsPrivate() const {
     return (Flags & static_cast<uint32_t>(MEMBER_FLAGS::PRIVATE_SLOT)) ==
@@ -447,6 +635,32 @@ struct XSESSION_MEMBER {
   }
 };
 static_assert_size(XSESSION_MEMBER, 0x10);
+
+struct XHTTP_URL_COMPONENTS {
+  xe::be<uint32_t> struct_size;
+  xe::be<uint32_t> scheme_ptr;
+  xe::be<uint32_t> scheme_length;
+  xe::be<uint32_t> scheme;
+  xe::be<uint32_t> host_name_ptr;
+  xe::be<uint32_t> host_name_length;
+  xe::be<uint16_t> port;
+  xe::be<uint32_t> user_name_ptr;
+  xe::be<uint32_t> user_name_length;
+  xe::be<uint32_t> password_ptr;
+  xe::be<uint32_t> password_length;
+  xe::be<uint32_t> url_path_ptr;
+  xe::be<uint32_t> url_path_length;
+  xe::be<uint32_t> extra_info_ptr;
+  xe::be<uint32_t> extra_info_length;
+};
+static_assert_size(XHTTP_URL_COMPONENTS, 0x3C);
+
+struct XAM_RELYING_PARTY_TOKEN {
+  xe::be<uint32_t> reserved;
+  xe::be<uint32_t> length;
+  xe::be<uint32_t> token_data_ptr;  // uint8_t*
+};
+static_assert_size(XAM_RELYING_PARTY_TOKEN, 0xC);
 
 struct X_PARTY_CUSTOM_DATA {
   xe::be<uint64_t> first;
@@ -492,42 +706,53 @@ struct X_PARTY_USER_LIST_INTERNAL {
 };
 static_assert_size(X_PARTY_USER_LIST_INTERNAL, 0x1008);
 
+struct XGI_XUSER_READ_STATS {
+  xe::be<uint32_t> title_id;
+  xe::be<uint32_t> xuids_count;
+  xe::be<uint32_t> xuids_ptr;
+  xe::be<uint32_t> specs_count;
+  xe::be<uint32_t> specs_ptr;
+  xe::be<uint32_t> results_size;
+  xe::be<uint32_t> results_ptr;
+};
+static_assert_size(XGI_XUSER_READ_STATS, 0x1C);
+
 struct X_USER_STATS_VIEW {
-  xe::be<uint32_t> ViewId;
-  xe::be<uint32_t> TotalViewRows;
-  xe::be<uint32_t> NumRows;
-  xe::be<uint32_t> pRows;
+  xe::be<uint32_t> view_id;
+  xe::be<uint32_t> total_view_rows;
+  xe::be<uint32_t> num_rows;
+  xe::be<uint32_t> rows_ptr;  // X_USER_STATS_ROW*
 };
 static_assert_size(X_USER_STATS_VIEW, 0x10);
 
 struct X_USER_STATS_COLUMN {
-  xe::be<uint16_t> ColumnId;
-  xam::X_USER_DATA Value;
+  xe::be<uint16_t> column_id;  // Column ordinal
+  xam::X_USER_DATA value;
 };
 static_assert_size(X_USER_STATS_COLUMN, 0x18);
 
 struct X_USER_STATS_ROW {
   xe::be<uint64_t> xuid;
-  xe::be<uint32_t> Rank;
+  xe::be<uint32_t> rank;
   xe::be<uint64_t> i64Rating;
-  CHAR szGamertag[16];
-  xe::be<uint32_t> NumColumns;
-  xe::be<uint32_t> pColumns;
+  char gamertag[16];
+  xe::be<uint32_t> num_columns;
+  xe::be<uint32_t> columns_ptr;  // X_USER_STATS_COLUMN*
 };
 static_assert_size(X_USER_STATS_ROW, 0x30);
 
 struct X_USER_STATS_READ_RESULTS {
   xe::be<uint32_t> num_views;
-  xe::be<uint32_t> views_ptr;
+  xe::be<uint32_t> views_ptr;  // X_USER_STATS_VIEW*
 };
 static_assert_size(X_USER_STATS_READ_RESULTS, 0x8);
 
 struct X_USER_STATS_SPEC {
   xe::be<uint32_t> view_id;
   xe::be<uint32_t> num_column_ids;
-  xe::be<uint16_t> column_Ids[kXUserMaxStatsAttributes];
+  xe::be<uint16_t> column_ids[X_USER_STATS_ATTRIBUTES_IN_SPEC];
 };
-static_assert_size(X_USER_STATS_SPEC, 8 + kXUserMaxStatsAttributes * 2);
+static_assert_size(X_USER_STATS_SPEC, 8 + X_USER_STATS_ATTRIBUTES_IN_SPEC * 2);
 
 struct X_USER_ESTIMATE_RANK_RESULTS {
   xe::be<uint32_t> num_ranks;
@@ -602,7 +827,7 @@ struct X_ARGUMENT_ENTRY {
 };
 static_assert_size(X_ARGUMENT_ENTRY, 0x10);
 
-struct __declspec(align(8)) X_ARGUMENT_LIST {
+struct X_ARGUMENT_LIST {
   X_ARGUMENT_ENTRY entry[32];
   xe::be<uint32_t> argument_count;
 };
@@ -637,6 +862,7 @@ struct X_MUTE_SET_STATE {
   xe::be<uint64_t> remote_xuid;
   xe::be<uint32_t> set_muted;
 };
+static_assert_size(X_MUTE_SET_STATE, 0x18);
 
 struct X_CREATE_FRIENDS_ENUMERATOR {
   X_ARGUMENT_ENTRY user_index;
@@ -822,6 +1048,10 @@ struct STRING_VERIFY_RESPONSE {
 };
 static_assert_size(STRING_VERIFY_RESPONSE, 0x6);
 
+struct X_VALIDATE_AVATAR_MANIFEST_RESULT {
+  uint8_t ValidationResult;
+};
+
 struct FIND_USER_INFO {
   xe::be<uint64_t> xuid;
   char gamertag[16];
@@ -836,28 +1066,28 @@ static_assert_size(FIND_USERS_RESPONSE, 0x8);
 
 struct X_ADDRESS_INFO {
   xe::be<uint16_t> street_1_length;
-  xe::be<uint32_t> street_1;  // uint16_t*
+  xe::be<uint32_t> street_1;  // char16_t*
   xe::be<uint16_t> street_2_length;
-  xe::be<uint32_t> street_2;  // uint16_t*
+  xe::be<uint32_t> street_2;  // char16_t*
   xe::be<uint16_t> city_length;
-  xe::be<uint32_t> city;  // uint16_t*
+  xe::be<uint32_t> city;  // char16_t*
   xe::be<uint16_t> district_length;
-  xe::be<uint32_t> district;  // uint16_t*
+  xe::be<uint32_t> district;  // char16_t*
   xe::be<uint16_t> state_length;
-  xe::be<uint32_t> state;  // uint16_t*
+  xe::be<uint32_t> state;  // char16_t*
   xe::be<uint16_t> postal_code_length;
-  xe::be<uint32_t> postal_code;  // uint16_t*
+  xe::be<uint32_t> postal_code;  // char16_t*
 };
 static_assert_size(X_ADDRESS_INFO, 0x24);
 
 struct X_GET_USER_INFO_RESPONSE {
   xe::be<uint16_t> first_name_length;
-  xe::be<uint32_t> first_name;  // uint16_t*
+  xe::be<uint32_t> first_name;  // char16_t*
   xe::be<uint16_t> last_name_length;
-  xe::be<uint32_t> last_name;  // uint16_t*
+  xe::be<uint32_t> last_name;  // char16_t*
   X_ADDRESS_INFO address_info;
   xe::be<uint16_t> email_length;
-  xe::be<uint32_t> email;  // uint16_t*
+  xe::be<uint32_t> email;  // char16_t*
   xe::be<uint16_t> language_id;
   xe::be<uint8_t> country_id;
   xe::be<uint8_t> msft_optin;

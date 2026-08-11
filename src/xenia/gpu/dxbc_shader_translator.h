@@ -49,7 +49,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
  public:
   DxbcShaderTranslator(ui::GraphicsProvider::GpuVendorID vendor_id,
                        bool bindless_resources_used, bool edram_rov_used,
-                       bool gamma_render_target_as_srgb = false,
+                       bool gamma_render_target_as_unorm8 = false,
                        bool msaa_2x_supported = true,
                        uint32_t draw_resolution_scale_x = 1,
                        uint32_t draw_resolution_scale_y = 1,
@@ -316,9 +316,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
     // components of each of the 32 used texture fetch constants.
     uint32_t texture_swizzled_signs[8];
 
-    // Whether the contents of each texture in fetch constants comes from a
-    // resolve operation.
-    uint32_t textures_resolved;
+    // Whether each texture in fetch constants contains resolution-scaled data.
+    uint32_t textures_resolution_scaled;
     // Log2 of X and Y sample size. Used for alpha to mask, and for MSAA with
     // ROV, this is used for EDRAM address calculation.
     uint32_t sample_count_log2[2];
@@ -330,7 +329,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
     uint32_t alpha_to_mask;
     uint32_t edram_32bpp_tile_pitch_dwords_scaled;
     uint32_t edram_depth_base_dwords_scaled;
-    uint32_t padding_edram_depth_base_dwords_scaled;
+    // UINT32_MAX when this draw is outside an active ZPD segment. The shader
+    // helper should treat that as a skip sentinel.
+    uint32_t zpd_rov_counter_index;
 
     float color_exp_bias[4];
 
@@ -425,13 +426,14 @@ class DxbcShaderTranslator : public ShaderTranslator {
 
       kTextureSwizzledSigns,
 
-      kTexturesResolved,
+      kTexturesResolutionScaled,
       kSampleCountLog2,
       kAlphaTestReference,
 
       kAlphaToMask,
       kEdram32bppTilePitchDwordsScaled,
       kEdramDepthBaseDwordsScaled,
+      kZpdRovCounterIndex,
 
       kColorExpBias,
 
@@ -517,6 +519,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
   enum class UAVRegister {
     kSharedMemory,
     kEdram,
+    kZpdRovCounter,
   };
 
   uint64_t GetDefaultVertexShaderModification(
@@ -577,6 +580,26 @@ class DxbcShaderTranslator : public ShaderTranslator {
                             uint32_t temp1_temp_component, uint32_t temp2_temp,
                             uint32_t temp2_temp_component,
                             bool remap_to_0_to_0_5);
+
+  // Converts one scalar from piecewise linear gamma to linear. The target may
+  // be the same as the source, the temporary variables must be different. If
+  // the source is not pre-saturated, saturation will be done internally.
+  static void PWLGammaToLinear(dxbc::Assembler& a, uint32_t target_temp,
+                               uint32_t target_temp_component,
+                               uint32_t source_temp,
+                               uint32_t source_temp_component,
+                               bool source_pre_saturated, uint32_t temp1,
+                               uint32_t temp1_component, uint32_t temp2,
+                               uint32_t temp2_component);
+  // Converts one scalar, which must be saturated before calling this function,
+  // from linear to piecewise linear gamma. The target may be the same as either
+  // the source or as temp_or_target, but not as both (and temp_or_target may
+  // not be the same as the source). temp_non_target must be different.
+  static void PreSaturatedLinearToPWLGamma(
+      dxbc::Assembler& a, uint32_t target_temp, uint32_t target_temp_component,
+      uint32_t source_temp, uint32_t source_temp_component,
+      uint32_t temp_or_target, uint32_t temp_or_target_component,
+      uint32_t temp_non_target, uint32_t temp_non_target_component);
 
  protected:
   void Reset() override;
@@ -689,24 +712,6 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // inactive.
   void ExportToMemory(uint8_t export_eM);
 
-  // Converts one scalar from piecewise linear gamma to linear. The target may
-  // be the same as the source, the temporary variables must be different. If
-  // the source is not pre-saturated, saturation will be done internally.
-  void PWLGammaToLinear(uint32_t target_temp, uint32_t target_temp_component,
-                        uint32_t source_temp, uint32_t source_temp_component,
-                        bool source_pre_saturated, uint32_t temp1,
-                        uint32_t temp1_component, uint32_t temp2,
-                        uint32_t temp2_component);
-  // Converts one scalar, which must be saturated before calling this function,
-  // from linear to piecewise linear gamma. The target may be the same as either
-  // the source or as temp_or_target, but not as both (and temp_or_target may
-  // not be the same as the source). temp_non_target must be different.
-  void PreSaturatedLinearToPWLGamma(
-      uint32_t target_temp, uint32_t target_temp_component,
-      uint32_t source_temp, uint32_t source_temp_component,
-      uint32_t temp_or_target, uint32_t temp_or_target_component,
-      uint32_t temp_non_target, uint32_t temp_non_target_component);
-
   bool IsSampleRate() const {
     assert_true(is_pixel_shader());
     return DSV_IsWritingFloat24Depth() && !current_shader().writes_depth();
@@ -761,6 +766,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // unchanged or known that it's safe not to await kills/alphatest/AtoC),
   // returns from the shader.
   void ROV_DepthStencilTest();
+  // Adds the surviving coverage MSAA counts from ROV params to the active ZPD
+  // counter slot after the final PS depth/stencil decision.
+  void ROV_AddPassedMSAASamplesToZPD();
   // Unpacks a 32bpp or a 64bpp color in packed_temp.packed_temp_components to
   // color_temp, using 2 temporary VGPRs.
   void ROV_UnpackColor(uint32_t rt_index, uint32_t packed_temp,
@@ -977,8 +985,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   bool edram_rov_used_;
 
   // Whether with RTV-based output-merger, k_8_8_8_8_GAMMA render targets are
-  // represented as host sRGB.
-  bool gamma_render_target_as_srgb_;
+  // represented as host 8-bit unsigned normalized, and require conversion in
+  // translated shaders.
+  bool gamma_render_target_as_unorm8_;
 
   // Whether 2x MSAA is emulated using real 2x MSAA rather than two samples of
   // 4x MSAA.
@@ -1205,6 +1214,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
   uint32_t uav_count_;
   uint32_t uav_index_shared_memory_;
   uint32_t uav_index_edram_;
+  uint32_t uav_index_zpd_rov_counter_;
 
   std::vector<SamplerBinding> sampler_bindings_;
 };

@@ -26,11 +26,7 @@
 #include "xenia/cpu/stack_walker.h"
 #include "xenia/cpu/xex_module.h"
 
-DEFINE_bool(record_mmio_access_exceptions, true,
-            "For guest addresses records whether we caught any mmio accesses "
-            "for them. This info can then be used on a subsequent run to "
-            "instruct the recompiler to emit checks",
-            "x64");
+DECLARE_bool(record_mmio_access_exceptions);
 
 DEFINE_int64(max_stackpoints, 65536,
              "Max number of host->guest stack mappings we can record.", "x64");
@@ -666,7 +662,7 @@ HostToGuestThunk X64HelperEmitter::EmitHostToGuestThunk() {
   mov(rdx, qword[rsp + 8 * 2]);
   mov(r8, qword[rsp + 8 * 3]);
   ret();
-#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+#else
   // System-V ABI args:
   // rdi = target
   // rsi = arg0 (context)
@@ -708,8 +704,6 @@ HostToGuestThunk X64HelperEmitter::EmitHostToGuestThunk() {
 
   add(rsp, stack_size);
   ret();
-#else
-  assert_always("Unknown platform ABI in host to guest thunk!");
 #endif
 
   code_offsets.tail = getSize();
@@ -757,12 +751,15 @@ GuestToHostThunk X64HelperEmitter::EmitGuestToHostThunk() {
   call(rax);
 
   EmitLoadVolatileRegs();
+  // Host callbacks may change MXCSR. Restore the guest scalar rounding mode
+  // so later guest FP ops observe the correct PPC rounding state.
+  vldmxcsr(GetBackendCtxPtr(offsetof(X64BackendContext, mxcsr_fpu)));
 
   code_offsets.epilog = getSize();
 
   add(rsp, stack_size);
   ret();
-#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+#else
   // This function is being called using the Microsoft ABI from CallNative
   // rcx = target function
   // rdx = arg0
@@ -805,13 +802,14 @@ GuestToHostThunk X64HelperEmitter::EmitGuestToHostThunk() {
   call(rax);
 
   EmitLoadVolatileRegs();
+  // Host callbacks may change MXCSR. Restore the guest scalar rounding mode
+  // so later guest FP ops observe the correct PPC rounding state.
+  vldmxcsr(GetBackendCtxPtr(offsetof(X64BackendContext, mxcsr_fpu)));
 
   code_offsets.epilog = getSize();
 
   add(rsp, stack_size);
   ret();
-#else
-  assert_always("Unknown platform ABI in guest to host thunk!")
 #endif
 
   code_offsets.tail = getSize();
@@ -865,7 +863,7 @@ ResolveFunctionThunk X64HelperEmitter::EmitResolveFunctionThunk() {
 
   add(rsp, stack_size);
   jmp(rax);
-#elif XE_PLATFORM_LINUX || XE_PLATFORM_MAC
+#else
   // Function is called with the following params:
   // ebx = target PPC address
   // rsi = context
@@ -904,8 +902,6 @@ ResolveFunctionThunk X64HelperEmitter::EmitResolveFunctionThunk() {
 
   add(rsp, stack_size);
   jmp(rax);
-#else
-  assert_always("Unknown platform ABI in resolve function!");
 #endif
 
   code_offsets.tail = getSize();

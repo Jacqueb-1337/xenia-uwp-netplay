@@ -105,8 +105,8 @@ X_ONLINE_FRIEND FriendPresenceObjectJSON::GetFriendPresence() const {
 
   peer.xuid = XUID();
 
-  char* gamertag_ptr = reinterpret_cast<char*>(peer.Gamertag);
-  strcpy(gamertag_ptr, Gamertag().c_str());
+  xe::string_util::copy_truncating(peer.Gamertag, Gamertag().c_str(),
+                                   sizeof(peer.Gamertag));
 
   peer.state = State();
   std::memcpy(&peer.session_id, &SessionID(), sizeof(XNKID));
@@ -128,7 +128,7 @@ X_ONLINE_FRIEND FriendPresenceObjectJSON::GetFriendPresence() const {
   return peer;
 }
 
-FriendsPresenceObjectJSON::FriendsPresenceObjectJSON() : xuids_(0) {}
+FriendsPresenceObjectJSON::FriendsPresenceObjectJSON() : xuids_({}) {}
 
 FriendsPresenceObjectJSON::~FriendsPresenceObjectJSON() {}
 
@@ -139,7 +139,7 @@ bool FriendsPresenceObjectJSON::Deserialize(const rapidjson::Value& obj) {
 
   for (const auto& presenceObj : obj.GetArray()) {
     FriendPresenceObjectJSON* presence = new FriendPresenceObjectJSON();
-    presence->Deserialize(presenceObj);
+    presence->Deserialize(presenceObj.GetObj());
 
     players_presence_.push_back(*presence);
   }

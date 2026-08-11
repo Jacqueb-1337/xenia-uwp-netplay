@@ -27,17 +27,15 @@ extern "C" {
 }  // extern "C"
 
 DEFINE_bool(enable_xmp, true, "Enables Music Player playback.", "APU");
-DEFINE_int32(xmp_default_volume, 70,
-             "Default music volume if game doesn't set it [0-100].", "APU");
 
 namespace xe {
 namespace apu {
 
-int32_t InitializeAndOpenAvCodec(std::vector<uint8_t>* song_data,
+int32_t InitializeAndOpenAvCodec(std::span<uint8_t> song_data,
                                  AVFormatContext*& format_context,
                                  AVCodecContext*& av_context) {
   AVIOContext* io_ctx =
-      avio_alloc_context(song_data->data(), (int)song_data->size(), 0, nullptr,
+      avio_alloc_context(song_data.data(), (int)song_data.size(), 0, nullptr,
                          nullptr, nullptr, nullptr);
 
   format_context = avformat_alloc_context();
@@ -124,13 +122,15 @@ ProcessAudioResult ProcessAudioLoop(AudioMediaPlayer* player,
         }
 
         ret = avcodec_receive_frame(avctx, frame);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+          break;
+        }
         if (ret < 0) {
           XELOGW("Error during decoding: {:X}", ret);
           break;
         }
 
-        ConvertAudioFrame(frame, avctx->channels, &frameBuffer);
+        ConvertAudioFrame(frame, avctx->ch_layout.nb_channels, &frameBuffer);
         player->ProcessAudioBuffer(&frameBuffer);
       }
     }
@@ -220,9 +220,8 @@ X_STATUS AudioMediaPlayer::Play(uint32_t playlist_handle, uint32_t song_handle,
 }
 
 void AudioMediaPlayer::Play() {
-  std::vector<uint8_t>* song_buffer = new std::vector<uint8_t>();
-
-  if (!LoadSongToMemory(song_buffer)) {
+  std::span<uint8_t> song_buffer = LoadSongToMemory();
+  if (song_buffer.empty()) {
     return;
   }
 
@@ -230,7 +229,8 @@ void AudioMediaPlayer::Play() {
   AVCodecContext* codecContext = nullptr;
   InitializeAndOpenAvCodec(song_buffer, formatContext, codecContext);
 
-  if (!SetupDriver(codecContext->sample_rate, codecContext->channels)) {
+  if (!SetupDriver(codecContext->sample_rate,
+                   codecContext->ch_layout.nb_channels)) {
     XELOGE("Driver initialization failed!");
     avcodec_free_context(&codecContext);
     av_freep(&formatContext->pb->buffer);
@@ -244,7 +244,8 @@ void AudioMediaPlayer::Play() {
   OnStateChanged();
 
   if (volume_ == 0.0f) {
-    volume_ = cvars::xmp_default_volume / 100.0f;
+    volume_ = kernel_state_->xconfig()->ReadSetting<float>(
+        kernel::XCONFIG_USER_CATEGORY, kernel::XCONFIG_USER_MUSIC_VOLUME);
   }
 
   // Always apply the stored volume to the newly created driver
@@ -395,9 +396,9 @@ X_STATUS AudioMediaPlayer::Previous() {
   return X_STATUS_SUCCESS;
 }
 
-bool AudioMediaPlayer::LoadSongToMemory(std::vector<uint8_t>* buffer) {
+std::span<uint8_t> AudioMediaPlayer::LoadSongToMemory() {
   if (!active_song_) {
-    return false;
+    return {};
   }
 
   // Find file based on provided path?
@@ -409,16 +410,26 @@ bool AudioMediaPlayer::LoadSongToMemory(std::vector<uint8_t>* buffer) {
       &vfs_file, &file_action);
 
   if (result) {
-    return false;
+    return {};
   }
 
-  buffer->resize(vfs_file->entry()->size());
-  size_t bytes_read = 0;
-  result = vfs_file->ReadSync(
-      std::span<uint8_t>(buffer->data(), vfs_file->entry()->size()), 0,
-      &bytes_read);
+  std::span<uint8_t> buffer = {
+      static_cast<uint8_t*>(av_malloc(vfs_file->entry()->size())),
+      vfs_file->entry()->size()};
 
-  return !result;
+  if (buffer.empty()) {
+    return {};
+  }
+
+  size_t bytes_read = 0;
+  result = vfs_file->ReadSync(buffer, 0, &bytes_read);
+  if (result != X_ERROR_SUCCESS) {
+    // Read failed. We need to manually release resources from av_malloc.
+    av_freep(buffer.data());
+    return {};
+  }
+
+  return buffer;
 }
 
 void AudioMediaPlayer::AddPlaylist(uint32_t handle,

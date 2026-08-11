@@ -45,6 +45,8 @@ X_STATUS XMutant::ReleaseMutant(uint32_t priority_increment, bool abandon,
     owning_thread_ = nullptr;
   }
 
+  set_priority_increment(priority_increment);
+
   // TODO(benvanik): abandoning.
   assert_false(abandon);
   if (mutant_->Release()) {
@@ -59,7 +61,8 @@ bool XMutant::Save(ByteStream* stream) {
     return false;
   }
 
-  uint32_t owning_thread_handle = owning_thread_ ? owning_thread_->handle() : 0;
+  XThread* owner = owning_thread_.load();
+  uint32_t owning_thread_handle = owner ? owner->handle() : 0;
   stream->Write<uint32_t>(owning_thread_handle);
   XELOGD("XMutant {:08X} (owner: {:08X})", handle(), owning_thread_handle);
 
@@ -83,7 +86,8 @@ object_ref<XMutant> XMutant::Restore(KernelState* kernel_state,
     mutant->owning_thread_ = kernel_state->object_table()
                                  ->LookupObject<XThread>(owning_thread_handle)
                                  .get();
-    mutant->owning_thread_->AcquireMutantOnStartup(retain_object(mutant));
+    mutant->owning_thread_.load()->AcquireMutantOnStartup(
+        retain_object(mutant));
   }
 
   return object_ref<XMutant>(mutant);

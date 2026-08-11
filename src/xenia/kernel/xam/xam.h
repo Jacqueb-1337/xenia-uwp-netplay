@@ -39,6 +39,12 @@ struct X_XAMACCOUNTINFO {
     kParentalControlEnabled = 0x1000000,
   };
 
+  enum AccountXboxLiveServiceProvider {
+    LiveDisabled = 0,
+    ProductionNet = 0x50524F44,
+    PartnerNet = 0x50415254
+  };
+
   enum AccountSubscriptionTier {
     kSubscriptionTierNone = 0,
     kSubscriptionTierSilver = 3,
@@ -98,6 +104,10 @@ struct X_XAMACCOUNTINFO {
     return static_cast<XLanguage>((cached_user_flags & kLanguageMask) >> 25);
   }
 
+  AccountXboxLiveServiceProvider GetXboxLiveServiceProvider() const {
+    return static_cast<AccountXboxLiveServiceProvider>(network_id.get());
+  }
+
   std::string GetGamertagString() const {
     return xe::to_utf8(xe::string_util::read_u16string_and_swap(gamertag));
   }
@@ -130,11 +140,26 @@ struct X_XAMACCOUNTINFO {
         cached_user_flags |
         (static_cast<uint32_t>(sub_tier) << 20) & kSubscriptionTierMask;
   }
+
+  void SetXboxLiveServiceProvider(
+      AccountXboxLiveServiceProvider service_provider) {
+    network_id = static_cast<uint32_t>(service_provider);
+  }
 };
 static_assert_size(X_XAMACCOUNTINFO, 0x17C);
 
 #define X_USER_GET_SIGNIN_INFO_ONLINE_XUID_ONLY 0x00000001
 #define X_USER_GET_SIGNIN_INFO_OFFLINE_XUID_ONLY 0x00000002
+
+#define X_USER_INFO_FLAG_LIVE_ENABLED 0x00000001
+#define X_USER_INFO_FLAG_GUEST 0x00000002
+
+#define X_USER_XUID_OFFLINE 0x00000001
+#define X_USER_XUID_ONLINE 0x00000002
+#define X_USER_XUID_GUEST 0x00000004
+
+#define X_UI_FLAGS_LOCALSIGNIN 0x00000001
+#define X_UI_FLAGS_ONLINEENABLED 0x00000002
 
 #define MAX_FIRSTNAME_SIZE 64
 #define MAX_LASTNAME_SIZE 64
@@ -348,6 +373,11 @@ enum class UserContextDevice : uint32_t {
   Microphone = 4,
 };
 
+enum class WriteTileType {
+  Tile = 1,  // Public
+  Personal = 2,
+};
+
 constexpr uint32_t XMP_MAX_METADATA_STRING = 40;
 constexpr uint32_t XMP_MAX_USER_PLAYLIST_ID = 572;
 constexpr uint32_t XMP_USER_PLAYLIST_RESERVED_FIELD_SIZE = 168;
@@ -367,6 +397,11 @@ struct X_STATS_DETAILS {
   xe::be<uint16_t> stats[kStatsMaxAmount];
 };
 static_assert_size(X_STATS_DETAILS, 8 + kStatsMaxAmount * 2);
+
+enum LoaderLaunchFlags : uint32_t {
+  GetSystemVersion = 0x00000040,  // XamUpdateGetCurrentSystemVersion
+  GetVersionFromExecutionId = 0x00010000,
+};
 
 }  // namespace xam
 }  // namespace kernel

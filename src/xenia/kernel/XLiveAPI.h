@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2024 Xenia Emulator. All rights reserved.                        *
+ * Copyright 2026 Xenia Canary. All rights reserved.                          *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,27 +10,33 @@
 #ifndef XENIA_KERNEL_XLIVEAPI_H_
 #define XENIA_KERNEL_XLIVEAPI_H_
 
+#include <future>
 #include <span>
 #include <unordered_set>
-
-#include "third_party/libcurl/include/curl/curl.h"
 
 #include "xenia/base/byte_order.h"
 #include "xenia/kernel/upnp.h"
 #include "xenia/kernel/util/net_utils.h"
+#include "xenia/kernel/xam/user_settings.h"
 #include "xenia/kernel/xsession.h"
+#include "xenia/ui/imgui_drawer.h"
 
 #include "xenia/kernel/json/arbitration_object_json.h"
 #include "xenia/kernel/json/delete_my_profiles_json.h"
 #include "xenia/kernel/json/find_users_object_json.h"
 #include "xenia/kernel/json/friend_presence_object_json.h"
+#include "xenia/kernel/json/getusersettings_object_json.h"
 #include "xenia/kernel/json/http_response_object_json.h"
 #include "xenia/kernel/json/leaderboard_object_json.h"
+#include "xenia/kernel/json/page_gamerpics_object_json.h"
 #include "xenia/kernel/json/player_object_json.h"
 #include "xenia/kernel/json/presence_object_json.h"
 #include "xenia/kernel/json/properties_object_json.h"
+#include "xenia/kernel/json/read_user_stats_object_json.h"
 #include "xenia/kernel/json/services_json.h"
 #include "xenia/kernel/json/session_object_json.h"
+#include "xenia/kernel/json/setusersettings_object_json.h"
+#include "xenia/kernel/json/title_gamerpics_object_json.h"
 #include "xenia/kernel/json/xstorage_file_info_object_json.h"
 
 #ifdef XE_PLATFORM_WIN32
@@ -38,224 +44,284 @@
 #endif  // XE_PLATFORM_WIN32
 
 namespace xe {
+
+// Settings must maintain order.
+using user_settingids_map =
+    std::map<uint64_t,
+             std::map<uint32_t, std::vector<kernel::xam::UserSettingId>>>;
+
+// Settings must maintain order.
+using user_settings_map =
+    std::map<uint64_t,
+             std::map<uint32_t, std::vector<kernel::xam::UserSetting>>>;
+
+using gamerpics_pair = std::pair<std::vector<uint8_t>, std::vector<uint8_t>>;
+
 namespace kernel {
 
 class XLiveAPI {
  public:
+  XLiveAPI();
+
+  ~XLiveAPI();
+
   enum class InitState { Success, Failed, Pending };
+
+  void PrintLibcurlDetails();
 
   static void IpGetConsoleXnAddr(XNADDR* XnAddr_ptr);
 
-  static InitState GetInitState();
+  static void GetXnAddrFromSessionObject(SessionObjectJSON session,
+                                         XNADDR* XnAddr_ptr);
 
-  static std::vector<std::string> ParseDelimitedList(std::string_view csv,
-                                                     uint32_t count = 0);
+  std::vector<std::string> ParseAPIList() const;
 
-  static std::string BuildCSVFromVector(std::vector<std::string>& data,
-                                        uint32_t count = 0);
+  void AddAPIAddress(std::string address) const;
 
-  static std::vector<std::string> ParseAPIList();
+  void RemoveAPIAddress(std::string api_address) const;
 
-  static std::vector<std::uint64_t> ParseFriendsXUIDs();
+  void SetAPIAddress(std::string address);
 
-  static void AddFriend(uint64_t xuid);
+  void BroadcastNetworkStatus() const;
 
-  static void RemoveFriend(uint64_t xuid);
+  void SetNetworkMode(uint32_t mode) const;
 
-  static void SetAPIAddress(std::string address);
+  bool SelectNetworkMode(uint32_t mode);
 
-  static void SetNetworkInterfaceByGUID(std::string guid);
+  void SetLogging(bool state) const;
 
-  static void SetNetworkMode(uint32_t mode);
+  void SetXHttp(bool state) const;
+
+  void SetBindInterface(bool state) const;
 
   static std::string GetApiAddress();
 
-  static uint32_t GetNatType();
+  static std::string BuildEndpoint(std::string endpoint);
 
-  static bool IsConnectedToServer();
+  void Init();
 
-  static bool IsConnectedToLAN();
+  NETWORK_MODE RefreshNetworkMode(bool lan_limit);
 
-  static uint16_t GetPlayerPort();
+  InitState GetInitState() const;
 
-  static int8_t GetVersionStatus();
+  uint32_t GetNatType() const;
 
-  static void Init();
+  bool IsConnectedToServer() const;
 
-  static void clearXnaddrCache();
+  uint16_t GetPlayerPort() const;
 
-  static sockaddr_in Getwhoami();
+  int8_t GetVersionStatus() const;
 
-  static void DownloadPortMappings();
+  void clearXnaddrCache();
 
-  static const uint64_t GetMachineId(const uint64_t macAddress);
+  void StartWhoamiAsync();
 
-  static const uint64_t GetLocalMachineId();
+  sockaddr_in Getwhoami();
 
-  static std::unique_ptr<HTTPResponseObjectJSON> RegisterPlayer();
+  void DownloadPortMappings();
 
-  static const std::map<uint64_t, std::string> DeleteMyProfiles();
+  std::unique_ptr<HTTPResponseObjectJSON> RegisterPlayer(const uint64_t xuid);
 
-  static std::unique_ptr<PlayerObjectJSON> FindPlayer(std::string ip);
+  const std::map<uint64_t, std::string> DeleteMyProfiles();
 
-  static bool UpdateQoSCache(const uint64_t sessionId,
-                             const std::vector<uint8_t> qos_payloade);
+  std::unique_ptr<PlayerObjectJSON> FindPlayer(std::string ip);
 
-  static void QoSPost(uint64_t sessionId, uint8_t* qosData, size_t qosLength);
+  bool UpdateQoSCache(const uint64_t sessionId,
+                      const std::vector<uint8_t> qos_payloade);
 
-  static response_data QoSGet(uint64_t sessionId);
+  void QoSPost(uint64_t sessionId, uint8_t* qosData, size_t qosLength);
 
-  static void SessionModify(uint64_t sessionId, XGI_SESSION_MODIFY* data);
+  response_data QoSGet(uint64_t sessionId);
 
-  static std::vector<std::unique_ptr<SessionObjectJSON>> GetTitleSessions(
+  void SessionModify(uint64_t sessionId, XGI_SESSION_MODIFY* data);
+
+  std::vector<std::unique_ptr<SessionObjectJSON>> GetTitleSessions(
       uint32_t title_id = 0);
 
-  static const std::vector<std::unique_ptr<SessionObjectJSON>> SessionSearch(
+  const std::vector<std::unique_ptr<SessionObjectJSON>> SessionSearch(
       XGI_SESSION_SEARCH* data, uint32_t num_users);
 
-  static void SessionContextSet(uint64_t session_id,
-                                std::map<uint32_t, uint32_t> contexts);
+  bool SessionPropertiesSet(uint64_t session_id, const uint64_t xuid);
 
-  static const std::map<uint32_t, uint32_t> SessionContextGet(
-      uint64_t session_id);
+  const std::vector<xam::Property> SessionPropertiesGet(uint64_t session_id);
 
-  static void SessionPropertiesSet(uint64_t session_id, uint32_t user_index);
+  const std::unique_ptr<SessionObjectJSON> SessionDetails(uint64_t sessionId);
 
-  static const std::vector<xam::Property> SessionPropertiesGet(
-      uint64_t session_id);
-
-  static const std::unique_ptr<SessionObjectJSON> SessionDetails(
-      uint64_t sessionId);
-
-  static std::unique_ptr<SessionObjectJSON> XSessionMigration(
+  std::unique_ptr<SessionObjectJSON> XSessionMigration(
       uint64_t sessionId, XGI_SESSION_MIGRATE* data);
 
-  static std::unique_ptr<ArbitrationObjectJSON> XSessionArbitration(
+  std::unique_ptr<ArbitrationObjectJSON> XSessionArbitration(
       uint64_t sessionId);
 
-  static void SessionWriteStats(uint64_t sessionId, XGI_STATS_WRITE stats);
+  bool SessionFlushStats(uint64_t sessionId,
+                         view_properties_unordered_map stats);
 
-  static std::unique_ptr<HTTPResponseObjectJSON> LeaderboardsFind(
-      const uint8_t* data);
+  std::unique_ptr<LeaderboardObjectJSON> LeaderboardsFind(
+      const XGI_XUSER_READ_STATS stats);
 
-  static void DeleteSession(uint64_t sessionId);
+  void DeleteSession(uint64_t sessionId);
 
-  static void DeleteAllSessionsByMac();
+  void DeleteAllSessionsByMac();
 
-  static void DeleteAllSessions();
+  void DeleteAllSessions();
 
-  static void XSessionCreate(uint64_t sessionId, XGI_SESSION_CREATE* data);
+  void XSessionCreate(uint64_t sessionId, XGI_SESSION_CREATE* data);
 
-  static std::unique_ptr<SessionObjectJSON> XSessionGet(uint64_t sessionId);
+  SessionObjectJSON XSessionGet(uint64_t sessionId);
 
-  static std::vector<X_TITLE_SERVER> GetServers();
+  std::vector<X_TITLE_SERVER> GetServers();
 
-  static std::unique_ptr<ServicesObjectJSON> GetServices();
+  std::unique_ptr<ServicesObjectJSON> GetServices();
 
-  static void SessionJoinRemote(
-      uint64_t sessionId, const std::unordered_map<uint64_t, bool> members);
+  bool Heartbeat() const;
 
-  static void SessionLeaveRemote(uint64_t sessionId,
-                                 const std::vector<xe::be<uint64_t>> xuids);
+  void SessionJoinRemote(uint64_t sessionId,
+                         const std::unordered_map<uint64_t, bool> members);
 
-  static void SessionPreJoin(uint64_t sessionId,
-                             const std::set<uint64_t>& xuids);
+  void SessionLeaveRemote(uint64_t sessionId,
+                          const std::vector<xe::be<uint64_t>> xuids);
 
-  static std::unique_ptr<FriendsPresenceObjectJSON> GetFriendsPresence(
-      const std::vector<uint64_t>& xuids);
+  void SessionPreJoin(uint64_t sessionId, const std::set<uint64_t>& xuids);
 
-  static X_STORAGE_BUILD_SERVER_PATH_RESULT XStorageBuildServerPath(
+  std::unique_ptr<FriendsPresenceObjectJSON> GetFriendsPresence(
+      const std::set<uint64_t>& xuids);
+
+  X_STORAGE_BUILD_SERVER_PATH_RESULT XStorageBuildServerPath(
       std::string server_path);
 
-  static bool XStorageDelete(std::string server_path);
+  bool XStorageDelete(std::string server_path);
 
-  static std::span<uint8_t> XStorageDownload(std::string server_path);
+  std::vector<uint8_t> XStorageDownload(std::string server_path);
 
-  static X_STORAGE_UPLOAD_RESULT XStorageUpload(std::string server_path,
-                                                std::span<uint8_t> buffer);
+  X_STORAGE_UPLOAD_RESULT XStorageUpload(std::string server_path,
+                                         std::span<uint8_t> buffer);
 
-  static std::pair<std::unique_ptr<XStorageFilesInfoObjectJSON>, bool>
+  std::pair<std::unique_ptr<XStorageFilesInfoObjectJSON>, bool>
   XStorageEnumerate(std::string server_path, uint32_t max_items);
 
-  static std::unique_ptr<FindUsersObjectJSON> GetFindUsers(
+  std::unique_ptr<FindUsersObjectJSON> GetFindUsers(
       const std::vector<FIND_USER_INFO>& find_users_info);
 
-  static void SetPresence();
+  PresenceObjectJSON BuildRichPresenceRequest(const std::set<uint64_t> xuids);
 
-  static std::unique_ptr<HTTPResponseObjectJSON> PraseResponse(
-      response_data response);
+  void SetPresence(const std::set<uint64_t> xuids);
 
-  static std::vector<FriendPresenceObjectJSON> GetAllFriendsPresence(
-      const uint32_t user_index);
+  bool SetUsersSettings(user_settingids_map settings);
 
-  static std::map<uint64_t, FriendPresenceObjectJSON> GetOfflineFriendsPresence(
-      const uint32_t user_index);
+  user_settings_map GetUsersSettings(user_settingids_map settings);
 
-  static std::map<uint64_t, FriendPresenceObjectJSON> GetOnlineFriendsPresence(
-      const uint32_t user_index);
+  std::vector<uint8_t> GetUserGamerpicTile(uint64_t xuid, bool small_tile);
 
-  static const uint8_t* GenerateMacAddress();
+  TitleGamerpicsObjectJSON GetTitleGamerpic(uint32_t title_id);
 
-  static const uint8_t* GetMACaddress();
+  std::set<uint32_t> GetSupportedGamerpicTitles();
 
-  static std::string GetNetworkFriendlyName(IP_ADAPTER_ADDRESSES adapter);
+  std::optional<PageGamerpicsObjectJSON> GetGamerpicPage(
+      uint32_t page, uint32_t per_page, std::string type_query);
 
-  static void DiscoverNetworkInterfaces();
+  std::map<uint32_t, std::vector<uint8_t>> GetMultiGameInfo(
+      std::unordered_map<uint32_t, std::string> images_data);
 
-  static bool UpdateNetworkInterface(sockaddr_in local_ip,
-                                     IP_ADAPTER_ADDRESSES adapter);
+  std::map<uint32_t, std::vector<uint8_t>> GetMultiGamerpics(
+      std::vector<std::string> cdn_parts);
 
-  static void SelectNetworkInterface();
+  std::vector<uint8_t> DownloadGamerpicTile(const uint32_t title_id,
+                                            const uint32_t tile_id);
 
-  static const sockaddr_in LocalIP() { return local_ip_; };
-  static const sockaddr_in OnlineIP() { return online_ip_; };
+  std::future<std::vector<uint8_t>> DownloadGamerpicTileAsync(uint32_t title_id,
+                                                              uint32_t tile_id);
 
-  static const std::string LocalIP_str() { return ip_to_string(local_ip_); };
-  static const std::string OnlineIP_str() { return ip_to_string(online_ip_); };
+  std::shared_future<gamerpics_pair> DownloadCompleteGamerpic(
+      xam::GamerPictureKey gamerpic_key);
 
-  inline static UPnP* upnp_handler = nullptr;
+  std::map<uint64_t, std::vector<uint8_t>> GetMultiGamerpicsFromXUIDs(
+      std::set<uint64_t> xuids, bool fsmall = false);
 
-  inline static MacAddress* mac_address_ = nullptr;
+  std::vector<uint8_t> DownloadRandomGamerpic();
 
-  inline static bool xlsp_servers_cached = false;
-  inline static std::vector<X_TITLE_SERVER> xlsp_servers{};
+  std::future<std::map<uint64_t, std::shared_ptr<xe::ui::ImmediateTexture>>>
+  GetFriendsGamerpicsAsync(const uint64_t xuid, ui::ImGuiDrawer* imgui_drawer);
 
-  inline static std::string interface_name;
+  std::unique_ptr<HTTPResponseObjectJSON> PraseResponse(response_data response);
 
-  inline static std::vector<uint8_t> adapter_addresses_buf{};
+  sockaddr_in OnlineIP() const { return online_ip_; };
 
-  inline static std::vector<IP_ADAPTER_ADDRESSES> adapter_addresses{};
+  std::string OnlineIP_str() const { return ip_to_string(online_ip_); };
 
-  inline static bool adapter_has_wan_routing = false;
+  std::string GetDefaultLocalServer() const { return default_local_server_; };
 
-  inline static std::map<uint32_t, uint64_t> sessionIdCache{};
-  inline static std::map<uint32_t, uint64_t> macAddressCache{};
-  inline static std::map<uint64_t, std::vector<uint8_t>> qos_payload_cache{};
+  std::string GetDefaultPublicServer() const { return default_public_server_; };
 
-  inline static xe::be<uint64_t> systemlink_id = 0;
+  bool IsXUIDMismatched() const { return xuid_mismatch_; };
 
-  inline static bool xuid_mismatch = false;
+  void SetXUIDMismatch(bool state) { xuid_mismatch_ = state; };
 
-  inline static uint32_t dummy_friends_count = 0;
+  uint32_t GetDummyFriendsCount() const { return dummy_friends_count_; };
 
-  inline static int8_t version_status;
+  void SetDummyFriendsCount(const uint32_t count) {
+    dummy_friends_count_ = count;
+  };
+
+  void AddCachedGamerpic(uint32_t id, std::vector<uint8_t> data) {
+    cached_gamerpics[id] = data;
+  };
+
+  std::optional<std::vector<uint8_t>> GetCachedGamerpic(uint32_t gamerpic_id) {
+    if (cached_gamerpics.contains(gamerpic_id)) {
+      return cached_gamerpics.at(gamerpic_id);
+    }
+
+    return std::nullopt;
+  };
+
+  void SetSystemlinkID(const uint64_t systemlink_xnkid) {
+    systemlink_id_ = systemlink_xnkid;
+  };
+
+  uint64_t GetSystemlinkID() const { return systemlink_id_; };
+
+  inline static std::map<uint32_t, uint64_t> sessionIdCache = {};
+  inline static std::map<uint32_t, uint64_t> macAddressCache = {};
 
  private:
-  inline static const std::string default_local_server_ =
-      "http://127.0.0.1:36000/";
+  const std::string default_local_server_ = "192.168.0.1:36000/";
 
-  inline static const std::string default_public_server_ = "";
+  const std::string default_public_server_ =
+      "https://xenia-netplay-2a0298c0e3f4.herokuapp.com/";
 
-  inline static InitState initialized_ = InitState::Pending;
+  sockaddr_in online_ip_ = {};
 
-  static std::unique_ptr<HTTPResponseObjectJSON> Get(
-      std::string endpoint, const uint32_t timeout = 0);
+  InitState initialized_ = InitState::Pending;
 
-  static std::unique_ptr<HTTPResponseObjectJSON> Post(std::string endpoint,
-                                                      const uint8_t* data,
-                                                      size_t data_size = 0);
+  bool xuid_mismatch_ = false;
 
-  static std::unique_ptr<HTTPResponseObjectJSON> Delete(std::string endpoint);
+  int8_t version_status_ = 0;
+
+  bool xlsp_servers_cached_ = false;
+
+  std::vector<X_TITLE_SERVER> xlsp_servers_ = {};
+
+  uint64_t systemlink_id_ = 0;
+
+  uint32_t dummy_friends_count_ = 0;
+
+  std::map<uint64_t, std::vector<uint8_t>> qos_payload_cache_ = {};
+
+  std::future<sockaddr_in> whoami_result_;
+
+  std::map<uint32_t, std::vector<uint8_t>> cached_gamerpics = {};
+
+  std::unique_ptr<HTTPResponseObjectJSON> Get(const std::string endpoint,
+                                              const uint32_t timeout = 0);
+
+  std::unique_ptr<HTTPResponseObjectJSON> Post(const std::string endpoint,
+                                               const uint8_t* data,
+                                               size_t data_size = 0);
+
+  std::unique_ptr<HTTPResponseObjectJSON> Delete(const std::string endpoint);
+
+  std::vector<HTTPResponseObjectJSON> GetMulti(
+      std::vector<std::string> urls, const uint32_t per_request_timeout = 0);
 
   // https://curl.se/libcurl/c/CURLOPT_WRITEFUNCTION.html
   static size_t callback(void* data, size_t size, size_t nmemb, void* clientp) {
@@ -263,7 +329,9 @@ class XLiveAPI {
     struct response_data* mem = (struct response_data*)clientp;
 
     char* ptr = (char*)realloc(mem->response, mem->size + realsize + 1);
-    if (ptr == NULL) return 0; /* out of memory! */
+    if (ptr == NULL) {
+      return 0; /* out of memory! */
+    }
 
     mem->response = ptr;
     memcpy(&(mem->response[mem->size]), data, realsize);
@@ -272,10 +340,6 @@ class XLiveAPI {
 
     return realsize;
   };
-
-  inline static sockaddr_in online_ip_{};
-
-  inline static sockaddr_in local_ip_{};
 };
 }  // namespace kernel
 }  // namespace xe

@@ -12,7 +12,9 @@
 
 #include <cstring>
 #include <future>
+#include <map>
 #include <queue>
+#include <set>
 #include <vector>
 
 #include "xenia/base/byte_order.h"
@@ -20,42 +22,69 @@
 
 #ifdef XE_PLATFORM_WIN32
 // clang-format off
-#define _WINSOCK_DEPRECATED_NO_WARNINGS  // inet_addr
-#include "xenia/base/platform_win.h"
+#include "xenia/base/platform.h"
 #include <WS2tcpip.h>
 #include <WinSock2.h>
-#include <mstcpip.h>
-#ifndef SIO_UDP_CONNRESET
-#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
-#endif
 // clang-format on
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <netinet/tcp.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
 
 namespace xe {
 namespace kernel {
-enum class X_WSAError : uint32_t {
-  X_WSA_INVALID_PARAMETER = 0x0057,
-  X_WSA_OPERATION_ABORTED = 0x03E3,
-  X_WSA_IO_INCOMPLETE = 0x03E4,
-  X_WSA_IO_PENDING = 0x03E5,
-  X_WSAEACCES = 0x271D,
-  X_WSAEFAULT = 0x271E,
-  X_WSAEINVAL = 0x2726,
-  X_WSAEWOULDBLOCK = 0x2733,
-  X_WSAENOTSOCK = 0x2736,
-  X_WSAEMSGSIZE = 0x2738,
-  X_WSAENETDOWN = 0x2742,
-  X_WSANO_DATA = 0x2AFC,
-  X_WSANOTINITIALISED = 0x276D,
-  X_WSAEADDRINUSE = 0x2740,
+// https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2
+enum class X_WSA_ERROR : uint32_t {
+  X_WSA_NO_ERROR = 0,
+  X_WSA_INVALID_PARAMETER = 87,
+  X_WSA_OPERATION_ABORTED = 995,
+  X_WSA_IO_INCOMPLETE = 996,
+  X_WSA_IO_PENDING = 997,
+  X_WSAEACCES = 10013,
+  X_WSAEFAULT = 10014,
+  X_WSAEINVAL = 10022,
+  X_WSAEWOULDBLOCK = 10035,
+  X_WSAEINPROGRESS = 10036,
+  X_WSAEALREADY = 10037,
+  X_WSAENOTSOCK = 10038,
+  X_WSAEMSGSIZE = 10040,
+  X_WSAENOPROTOOPT = 10042,
+  X_WSAEPROTONOSUPPORT = 10043,
+  X_WSAESOCKTNOSUPPORT = 10044,
+  X_WSAEAFNOSUPPORT = 10047,
+  X_WSAEADDRINUSE = 10048,
+  X_WSAEADDRNOTAVAIL = 10049,
+  X_WSAENETDOWN = 10050,
+  X_WSAECONNRESET = 10054,
+  X_WSAENOBUFS = 10055,
+  X_WSAEISCONN = 10056,
+  X_WSAENOTCONN = 10057,
+  X_WSAESHUTDOWN = 10058,
+  X_WSAETIMEDOUT = 10060,
+  X_WSAECONNREFUSED = 10061,
+  X_WSAEHOSTUNREACH = 10065,
+  X_WSASYSNOTREADY = 10091,
+  X_WSAVERNOTSUPPORTED = 10092,
+  X_WSANOTINITIALISED = 10093,
+  X_WSAECANCELLED = 10103,
+  X_WSASYSCALLFAILURE = 10107,
+  X_WSAHOST_NOT_FOUND = 11001,
+  X_WSATRY_AGAIN = 11002,
+  X_WSANO_DATA = 11004,
 };
+
+/*
+ * Option flags per-socket.
+ */
+#define SO_MARKINSECURE 0x5801   // bool TRUE for insecure
+#define SO_PRIVATE 0x5802        // bool TRUE for private
+#define SO_GRANTINSECURE 0x5803  // bool TRUE for insecure
 
 struct XSOCKADDR {
   xe::be<uint16_t> address_family;
@@ -91,13 +120,31 @@ struct XWSABUF {
 static_assert_size(XWSABUF, 0x8);
 
 struct XWSAOVERLAPPED {
-  xe::be<uint32_t> internal;
-  xe::be<uint32_t> internal_high;
-  xe::be<uint32_t> offset;
+  xe::be<uint32_t> internal;       // Status/Error Codes HRESULT
+  xe::be<uint32_t> internal_high;  // Transfer
+  xe::be<uint32_t> offset;         // Flags
   xe::be<uint32_t> offset_high;
   xe::be<uint32_t> event_handle;
 };
 static_assert_size(XWSAOVERLAPPED, 0x14);
+
+struct WSASendToData {
+  std::shared_ptr<XWSABUF[]> buffers;
+  uint32_t num_buffers;
+  XSOCKADDR_IN* to;
+  int to_len;
+  XWSAOVERLAPPED* overlapped;
+};
+
+struct WSARecvFromData {
+  std::shared_ptr<XWSABUF> buffers;
+  uint32_t num_buffers;
+  xe::be<uint32_t>* num_bytes_recv;
+  xe::be<uint32_t>* flags;
+  XSOCKADDR_IN* from;
+  xe::be<uint32_t>* from_len;
+  XWSAOVERLAPPED* overlapped;
+};
 
 class XSocket : public XObject {
  public:
@@ -127,21 +174,33 @@ class XSocket : public XObject {
 
   uint64_t native_handle() const { return native_handle_; }
   uint16_t bound_port() const { return bound_port_; }
+  Protocol protocol() const { return proto_; }
+  bool IsBound() const { return bound_; }
+  bool IsVDPProtocol() const { return vdp_; }
+  std::string GetProtocolUPnPString() const {
+    if (proto_ == X_IPPROTO_UDP || proto_ == X_IPPROTO_VDP) {
+      return "UDP";
+    } else if (proto_ == X_IPPROTO_TCP) {
+      return "TCP";
+    } else {
+      return "UDP";
+    }
+  }
 
   X_STATUS Initialize(AddressFamily af, Type type, Protocol proto);
-  X_STATUS Close();
+  int Close();
 
   X_STATUS GetOption(uint32_t level, uint32_t optname, void* optval_ptr,
                      uint32_t* optlen);
-  X_STATUS SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
-                     uint32_t optlen);
-  X_STATUS IOControl(uint32_t cmd, uint8_t* arg_ptr);
+  int SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+                uint32_t optlen);
+  X_STATUS IOControl(uint32_t cmd, uint32_t* arg_ptr);
 
   X_STATUS Connect(const XSOCKADDR_IN* name, int name_len);
   X_STATUS Bind(const XSOCKADDR_IN* name, int name_len);
   X_STATUS Listen(int backlog);
   X_STATUS GetPeerName(XSOCKADDR_IN* name, int* name_len);
-  X_STATUS GetSockName(XSOCKADDR_IN* buf, int* buf_len);
+  X_STATUS GetSockName(XSOCKADDR_IN* name, int* name_len);
   object_ref<XSocket> Accept(XSOCKADDR_IN* name, int* name_len);
   int Shutdown(int how);
 
@@ -149,23 +208,33 @@ class XSocket : public XObject {
   int Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags);
 
   int RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
-               XSOCKADDR_IN* from, uint32_t* from_len);
+               XSOCKADDR_IN* from, socklen_t* from_len);
   int SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, XSOCKADDR_IN* to,
              uint32_t to_len);
 
   int WSAEventSelect(uint64_t socket_handle, uint64_t event_handle,
                      uint32_t flags);
 
+  int WSASendTo(XWSABUF* buffers, uint32_t num_buffers,
+                xe::be<uint32_t>* num_bytes_sent_ptr, uint32_t flags,
+                XSOCKADDR_IN* to_ptr, uint32_t to_len,
+                XWSAOVERLAPPED* overlapped_ptr);
+
   int WSARecvFrom(XWSABUF* buffers, uint32_t num_buffers,
                   xe::be<uint32_t>* num_bytes_recv_ptr,
                   xe::be<uint32_t>* flags_ptr, XSOCKADDR_IN* from_ptr,
                   xe::be<uint32_t>* fromlen_ptr,
                   XWSAOVERLAPPED* overlapped_ptr);
+
   bool WSAGetOverlappedResult(XWSAOVERLAPPED* overlapped_ptr,
                               xe::be<uint32_t>* bytes_transferred, bool wait,
                               xe::be<uint32_t>* flags_ptr);
 
-  uint32_t GetLastWSAError() const;
+  int WSACancelOverlappedIO();
+
+  static bool XWSAIsKnownError(X_WSA_ERROR error);
+
+  static uint32_t XWSAGetLastError();
 
   struct packet {
     // These values are in network byte order.
@@ -180,17 +249,21 @@ class XSocket : public XObject {
   bool QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf,
                    size_t len);
 
+  std::mutex send_socket_mutex_;
+  std::mutex receive_socket_mutex_;
+
  private:
   XSocket(KernelState* kernel_state, uint64_t native_handle);
-  uint64_t native_handle_ = -1;
+  uint64_t native_handle_ = X_INVALID_SOCKET;
+  bool socket_closed_ = false;
 
-  AddressFamily af_;    // Address family
-  Type type_;           // Type (DGRAM/Stream/etc)
-  Protocol proto_;      // Protocol (TCP/UDP/etc)
-  bool secure_ = true;  // Secure socket (encryption enabled)
+  AddressFamily af_;     // Address family
+  Type type_;            // Type (DGRAM/Stream/etc)
+  Protocol proto_;       // Protocol (TCP/UDP/etc)
+  bool vdp_;             // VDP Protocol
+  bool secure_ = false;  // Secure socket (encryption enabled)
 
   bool bound_ = false;  // Explicitly bound to an IP address?
-  bool nonblocking_ = false;
 
   // Special exception for port!
   // port is always stored in NBO (Network byte order).
@@ -203,19 +276,26 @@ class XSocket : public XObject {
   std::mutex incoming_packet_mutex_;
   std::queue<uint8_t*> incoming_packets_;
 
-  std::vector<std::future<int>> polling_tasks_;
+  std::map<XWSAOVERLAPPED*, std::future<int32_t>> send_polling_tasks_;
+  std::map<XWSAOVERLAPPED*, std::future<int32_t>> receive_polling_tasks_;
 
-  std::mutex receive_mutex_;
-  std::condition_variable receive_cv_;
-  std::condition_variable receive_order_cv_;
-  std::mutex receive_socket_mutex_;
-  std::vector<XWSAOVERLAPPED*> active_overlappeds_;
-  uint64_t receive_enqueue_sequence_ = 0;
-  uint64_t receive_dequeue_sequence_ = 0;
+  uint16_t GetImplicitlyBoundPort() const;
 
-  int PollWSARecvFrom(bool wait, struct WSARecvFromData data);
+  std::atomic<bool> cancel_overlapped_ = false;
 
-  void SetLastWSAError(X_WSAError) const;
+  std::set<uint32_t> cancelled_overlapped_io_;
+  std::mutex cancelled_overlapped_io_mutex_;
+
+  int WSASelectWrite(bool wait, X_WSA_ERROR* error);
+
+  int PollWSASendTo(bool wait, WSASendToData send_async_data,
+                    uint32_t* num_bytes_sent);
+
+  int WSASelectRead(bool wait, X_WSA_ERROR* error);
+
+  int PollWSARecvFrom(bool wait, WSARecvFromData receive_async_data);
+
+  void XWSASetLastError(X_WSA_ERROR) const;
 };
 
 }  // namespace kernel

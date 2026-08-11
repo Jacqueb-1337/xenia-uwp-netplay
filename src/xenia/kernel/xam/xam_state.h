@@ -15,6 +15,8 @@
 #include "xenia/kernel/xam/achievement_manager.h"
 #include "xenia/kernel/xam/app_manager.h"
 #include "xenia/kernel/xam/content_manager.h"
+#include "xenia/kernel/xam/friends_manager.h"
+#include "xenia/kernel/xam/presence_manager.h"
 #include "xenia/kernel/xam/profile_manager.h"
 #include "xenia/kernel/xam/user_tracker.h"
 #include "xenia/kernel/xam/xam.h"
@@ -44,6 +46,8 @@ class XamState {
     return achievement_manager_.get();
   }
   ProfileManager* profile_manager() const { return profile_manager_.get(); }
+  FriendsManager* friends_manager() const { return friends_manager_.get(); }
+  PresenceManager* presence_manager() const { return presence_manager_.get(); }
 
   UserTracker* user_tracker() const { return user_tracker_.get(); }
   SpaInfo* spa_info() const { return spa_info_.get(); }
@@ -60,11 +64,22 @@ class XamState {
 
   void LoadSpaInfo(const SpaInfo* info);
 
+  void StartPeriodicMaintenance() const;
+  void StopPeriodicMaintenance() const;
+
   void SetContentRegisterCallback(uint32_t callback);
 
   bool IsUIActive() const {
     return xam_dialogs_shown_ > 0 || xam_nui_dialogs_shown_ > 0;
   }
+
+  uint32_t GetOnlineSchemaAddress() const { return online_schema_data_address; }
+
+  uint32_t GetLanguageFallbackAddress(uint32_t index) const {
+    return language_fallback_address_[index];
+  }
+
+  uint32_t GetIptvNameAddress() const { return iptv_name_address_; }
 
   X_DASH_APP_INFO dash_app_info_ = {};
   uint32_t dash_backstack_nodes_count_ = 0;
@@ -75,6 +90,11 @@ class XamState {
   std::atomic<int32_t> xam_nui_dialogs_shown_ = {0};
 
  private:
+  void LoadOnlineSchema();
+  void LoadLanguageLocaleFallback();
+  void LoadIptvServiceName();
+  void LoadOnlineFriends();
+
   KernelState* kernel_state_;
 
   std::unique_ptr<AppManager> app_manager_;
@@ -82,8 +102,15 @@ class XamState {
   std::unique_ptr<UserTracker> user_tracker_;
   std::unique_ptr<AchievementManager> achievement_manager_;
   std::unique_ptr<ProfileManager> profile_manager_;
+  std::unique_ptr<FriendsManager> friends_manager_;
+  std::unique_ptr<PresenceManager> presence_manager_;
 
   std::unique_ptr<SpaInfo> spa_info_;
+
+  // Custom XAM stuff
+  uint32_t online_schema_data_address;
+  std::array<uint32_t, 0x12> language_fallback_address_{};
+  uint32_t iptv_name_address_{};
 };
 
 }  // namespace xam

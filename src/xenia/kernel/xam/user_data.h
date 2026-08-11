@@ -67,6 +67,21 @@ static_assert_size(X_USER_DATA_UNION, 8);
 struct alignas(8) X_USER_DATA {
   X_USER_DATA_TYPE type;
   X_USER_DATA_UNION data;
+
+  X_USER_DATA() = default;
+
+  X_USER_DATA(X_USER_DATA& other) : type(other.type) {
+    data.filetime = other.data.filetime;
+  };
+
+  X_USER_DATA(const X_USER_DATA& other) : type(other.type) {
+    data.filetime = other.data.filetime;
+  };
+
+  // Does not validate additional data such as binary or unicode.
+  bool operator==(const X_USER_DATA& other) const {
+    return type == other.type && other.data.filetime == data.filetime;
+  }
 };
 static_assert_size(X_USER_DATA, 16);
 
@@ -130,8 +145,12 @@ class UserData {
            data_.type == X_USER_DATA_TYPE::WSTRING;
   }
 
+  static AttributeKey get_attribute_key(uint32_t id) {
+    return AttributeKey{.value = id};
+  }
+
   static X_USER_DATA_TYPE get_type(uint32_t id) {
-    return static_cast<X_USER_DATA_TYPE>(id >> 28);
+    return static_cast<X_USER_DATA_TYPE>(get_attribute_key(id).type);
   }
 
   static bool is_system_property(uint32_t id) {
@@ -139,7 +158,7 @@ class UserData {
   }
 
   static uint16_t get_max_size(uint32_t id) {
-    return static_cast<uint16_t>(id >> 16) & kMaxUserDataSize;
+    return std::min<uint16_t>(get_attribute_key(id).size, kMaxUserDataSize);
   }
 
   static bool requires_additional_data(uint32_t id) {

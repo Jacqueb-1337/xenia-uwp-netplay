@@ -71,76 +71,41 @@ namespace gpu {
 
 const TextureCache::LoadShaderInfo
     TextureCache::load_shader_info_[kLoadShaderCount] = {
-        // k8bpb
-        {3, 4, 1, 4},
-        // k16bpb
-        {4, 4, 2, 4},
-        // k32bpb
-        {4, 4, 4, 3},
-        // k64bpb
-        {4, 4, 8, 2},
-        // k128bpb
-        {4, 4, 16, 1},
-        // kR5G5B5A1ToB5G5R5A1
-        {4, 4, 2, 4},
-        // kR5G6B5ToB5G6R5
-        {4, 4, 2, 4},
-        // kR5G5B6ToB5G6R5WithRBGASwizzle
-        {4, 4, 2, 4},
-        // kRGBA4ToBGRA4
-        {4, 4, 2, 4},
-        // kRGBA4ToARGB4
-        {4, 4, 2, 4},
-        // kGBGR8ToGRGB8
-        {4, 4, 4, 3},
-        // kGBGR8ToRGB8
-        {4, 4, 8, 3},
-        // kBGRG8ToRGBG8
-        {4, 4, 4, 3},
-        // kBGRG8ToRGB8
-        {4, 4, 8, 3},
-        // kR10G11B11ToRGBA16
-        {4, 4, 8, 3},
-        // kR10G11B11ToRGBA16SNorm
-        {4, 4, 8, 3},
-        // kR11G11B10ToRGBA16
-        {4, 4, 8, 3},
-        // kR11G11B10ToRGBA16SNorm
-        {4, 4, 8, 3},
-        // kR16UNormToFloat
-        {4, 4, 2, 4},
-        // kR16SNormToFloat
-        {4, 4, 2, 4},
-        // kRG16UNormToFloat
-        {4, 4, 4, 3},
-        // kRG16SNormToFloat
-        {4, 4, 4, 3},
-        // kRGBA16UNormToFloat
-        {4, 4, 8, 2},
-        // kRGBA16SNormToFloat
-        {4, 4, 8, 2},
-        // kDXT1ToRGBA8
-        {4, 4, 4, 2},
-        // kDXT3ToRGBA8
-        {4, 4, 4, 1},
-        // kDXT5ToRGBA8
-        {4, 4, 4, 1},
-        // kDXNToRG8
-        {4, 4, 2, 1},
-        // kDXT3A
-        {4, 4, 1, 2},
-        // kDXT3AAs1111ToBGRA4
-        {4, 4, 2, 2},
-        // kDXT3AAs1111ToARGB4
-        {4, 4, 2, 2},
-        // kDXT5AToR8
-        {4, 4, 1, 2},
-        // kCTX1
-        {4, 4, 2, 2},
-        // kDepthUnorm
-        {4, 4, 4, 3},
-        // kDepthFloat
-        {4, 4, 4, 3},
+        {1, 4},   // k8bpb
+        {2, 4},   // k16bpb
+        {4, 3},   // k32bpb
+        {8, 2},   // k64bpb
+        {16, 1},  // k128bpb
+        {2, 4},   // kR5G5B5A1ToB5G5R5A1
+        {2, 4},   // kR5G6B5ToB5G6R5
+        {2, 4},   // kR5G5B6ToB5G6R5WithRBGASwizzle
+        {2, 4},   // kRGBA4ToBGRA4
+        {2, 4},   // kRGBA4ToARGB4
+        {4, 3},   // kGBGR8ToGRGB8
+        {8, 3},   // kGBGR8ToRGB8
+        {4, 3},   // kBGRG8ToRGBG8
+        {8, 3},   // kBGRG8ToRGB8
+        {8, 3},   // kR10G11B11ToRGBA16
+        {8, 3},   // kR10G11B11ToRGBA16SNorm
+        {8, 3},   // kR11G11B10ToRGBA16
+        {8, 3},   // kR11G11B10ToRGBA16SNorm
+        {2, 4},   // kR16UNormToFloat
+        {2, 4},   // kR16SNormToFloat
+        {4, 3},   // kRG16UNormToFloat
+        {4, 3},   // kRG16SNormToFloat
+        {8, 2},   // kRGBA16UNormToFloat
+        {8, 2},   // kRGBA16SNormToFloat
+        {4, 2},   // kDXT1ToRGBA8
+        {4, 1},   // kDXT3ToRGBA8
+        {4, 1},   // kDXT5ToRGBA8
+        {2, 1},   // kDXNToRG8
+        {1, 2},   // kDXT3A
+        {2, 2},   // kDXT3AAs1111ToBGRA4
+        {2, 2},   // kDXT3AAs1111ToARGB4
+        {1, 2},   // kDXT5AToR8
+        {2, 2},   // kCTX1
+        {4, 3},   // kDepthUnorm
+        {4, 3},   // kDepthFloat
 };
 
 TextureCache::TextureCache(const RegisterFile& register_file,
@@ -329,7 +294,7 @@ void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled,
 
   // Invalidate textures. Toggling individual textures between scaled and
   // unscaled also relies on invalidation through shared memory.
-  shared_memory().RangeWrittenByGpu(start_unscaled, length_unscaled, true);
+  shared_memory().RangeWrittenByGpu(start_unscaled, length_unscaled);
 }
 
 uint32_t TextureCache::GuestToHostSwizzle(uint32_t guest_swizzle,
@@ -508,8 +473,6 @@ TextureCache::Texture::Texture(TextureCache& texture_cache,
     : texture_cache_(texture_cache),
       key_(key),
       guest_layout_(key.GetGuestLayout()),
-      base_resolved_(key.scaled_resolve),
-      mips_resolved_(key.scaled_resolve),
       last_usage_submission_index_(texture_cache.current_submission_index_),
       last_usage_time_(texture_cache.current_submission_time_),
       used_previous_(track_usage ? texture_cache.texture_used_last_ : nullptr),
@@ -554,23 +517,38 @@ TextureCache::Texture::~Texture() {
   texture_cache_.UpdateTexturesTotalHostMemoryUsage(0, host_memory_usage_);
 }
 
-void TextureCache::Texture::MakeUpToDateAndWatch(
+bool TextureCache::Texture::MakeUpToDateAndWatch(
     const global_unique_lock_type& global_lock) {
   SharedMemory& shared_memory = texture_cache().shared_memory();
-  if (base_outdated_) {
+  const bool watch_base = base_outdated_;
+  const bool watch_mips = mips_outdated_;
+  assert_true(global_lock.owns_lock());
+  if (watch_base &&
+      !shared_memory.IsRangeValid(
+          key().base_page << 12, xe::align(GetGuestBaseSize(), UINT32_C(16)))) {
+    return false;
+  }
+  if (watch_mips &&
+      !shared_memory.IsRangeValid(
+          key().mip_page << 12, xe::align(GetGuestMipsSize(), UINT32_C(16)))) {
+    return false;
+  }
+
+  if (watch_base) {
     assert_not_zero(GetGuestBaseSize());
     base_outdated_ = false;
     base_watch_handle_ = shared_memory.WatchMemoryRange(
         key().base_page << 12, GetGuestBaseSize(), TextureCache::WatchCallback,
         this, nullptr, 0);
   }
-  if (mips_outdated_) {
+  if (watch_mips) {
     assert_not_zero(GetGuestMipsSize());
     mips_outdated_ = false;
     mips_watch_handle_ = shared_memory.WatchMemoryRange(
         key().mip_page << 12, GetGuestMipsSize(), TextureCache::WatchCallback,
         this, nullptr, 1);
   }
+  return true;
 }
 
 void TextureCache::Texture::MarkAsUsed() {
@@ -767,21 +745,17 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
     // portion of its pages is invalidated, in this case we'll need the texture
     // from the shared memory to load the unscaled parts.
     // TODO(Triang3l): Load unscaled parts.
-    bool base_resolved = texture.GetBaseResolved();
     if (index_base_outdated & (1ULL << i)) {
       if (!shared_memory().RequestRange(
               texture_key.base_page << 12,
-              xe::align(texture.GetGuestBaseSize(), UINT32_C(16)),
-              texture_key.scaled_resolve ? nullptr : &base_resolved)) {
+              xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
         continue;
       }
     }
-    bool mips_resolved = texture.GetMipsResolved();
     if (index_mips_outdated & (1ULL << i)) {
       if (!shared_memory().RequestRange(
               texture_key.mip_page << 12,
-              xe::align(texture.GetGuestMipsSize(), UINT32_C(16)),
-              texture_key.scaled_resolve ? nullptr : &mips_resolved)) {
+              xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
         continue;
       }
     }
@@ -807,13 +781,6 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
       continue;
     }
 
-    // Update the source of the texture (resolve vs. CPU or memexport) for
-    // purposes of handling piecewise gamma emulation via sRGB and for
-    // resolution scale in sampling offsets.
-    if (!texture_key.scaled_resolve) {
-      texture.SetBaseResolved(base_resolved);
-      texture.SetMipsResolved(mips_resolved);
-    }
     // reque for makeuptodatandwatch
     textures[i] = &texture;
   }
@@ -829,7 +796,9 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
       // resolves as well to detect when the CPU wants to reuse the memory for a
       // regular texture or a vertex buffer, and thus the scaled resolve version
       // is not up to date anymore.
-      texture->MakeUpToDateAndWatch(crit);
+      if (!texture->MakeUpToDateAndWatch(crit)) {
+        continue;
+      }
 
       texture->LogAction("Loaded");
     }
@@ -870,21 +839,17 @@ bool TextureCache::LoadTextureData(Texture& texture) {
   // its pages is invalidated, in this case we'll need the texture from the
   // shared memory to load the unscaled parts.
   // TODO(Triang3l): Load unscaled parts.
-  bool base_resolved = texture.GetBaseResolved();
   if (base_outdated) {
     if (!shared_memory().RequestRange(
             texture_key.base_page << 12,
-            xe::align(texture.GetGuestBaseSize(), UINT32_C(16)),
-            texture_key.scaled_resolve ? nullptr : &base_resolved)) {
+            xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
       return false;
     }
   }
-  bool mips_resolved = texture.GetMipsResolved();
   if (mips_outdated) {
     if (!shared_memory().RequestRange(
             texture_key.mip_page << 12,
-            xe::align(texture.GetGuestMipsSize(), UINT32_C(16)),
-            texture_key.scaled_resolve ? nullptr : &mips_resolved)) {
+            xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
       return false;
     }
   }
@@ -909,19 +874,13 @@ bool TextureCache::LoadTextureData(Texture& texture) {
     return false;
   }
 
-  // Update the source of the texture (resolve vs. CPU or memexport) for
-  // purposes of handling piecewise gamma emulation via sRGB and for resolution
-  // scale in sampling offsets.
-  if (!texture_key.scaled_resolve) {
-    texture.SetBaseResolved(base_resolved);
-    texture.SetMipsResolved(mips_resolved);
-  }
-
   // Mark the ranges as uploaded and watch them. This is needed for scaled
   // resolves as well to detect when the CPU wants to reuse the memory for a
   // regular texture or a vertex buffer, and thus the scaled resolve version is
   // not up to date anymore.
-  texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
+  if (!texture.MakeUpToDateAndWatch(global_critical_region_.Acquire())) {
+    return false;
+  }
 
   texture.LogAction("Loaded");
 

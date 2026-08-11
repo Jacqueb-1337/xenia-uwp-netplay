@@ -7,9 +7,11 @@
  ******************************************************************************
  */
 
+#include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
+#include "xenia/config.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/title_id_utils.h"
 #include "xenia/kernel/user_module.h"
@@ -20,6 +22,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_memory.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_modules.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+#include "xenia/kernel/xconfig.h"
 #include "xenia/kernel/xenumerator.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -43,10 +46,6 @@ DEFINE_int32(avpack, 8,
              " 7 = TV PAL-60\n"
              " 8 = HDMI (default)",
              "Video");
-DECLARE_int32(user_country);
-DECLARE_int32(user_language);
-DECLARE_uint32(audio_flag);
-
 DEFINE_bool(staging_mode, 0,
             "Enables preview mode in dashboards to render debug information.",
             "Kernel");
@@ -64,64 +63,211 @@ DECLARE_XAM_EXPORT1(XamFeatureEnabled, kNone, kStub);
 dword_result_t XamGetStagingMode_entry() { return cvars::staging_mode; }
 DECLARE_XAM_EXPORT1(XamGetStagingMode, kNone, kStub);
 
-// Empty stub schema binary.
-uint8_t schema_bin[] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,
-    0x00, 0x2C, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x2C, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18,
-};
-
 dword_result_t XamGetOnlineSchema_entry() {
-  static uint32_t schema_guest = 0;
-
-  if (!schema_guest) {
-    schema_guest =
-        kernel_state()->memory()->SystemHeapAlloc(8 + sizeof(schema_bin));
-    auto schema = kernel_state()->memory()->TranslateVirtual(schema_guest);
-    std::memcpy(schema + 8, schema_bin, sizeof(schema_bin));
-    xe::store_and_swap<uint32_t>(schema + 0, schema_guest + 8);
-    xe::store_and_swap<uint32_t>(schema + 4, sizeof(schema_bin));
-  }
-
-  // return pointer to the schema ptr/schema size struct
-  return schema_guest;
+  return kernel_state()->xam_state()->GetOnlineSchemaAddress();
 }
 DECLARE_XAM_EXPORT1(XamGetOnlineSchema, kNone, kImplemented);
 
-void XamFormatDateString_entry(dword_t locale_format, qword_t filetime,
-                               lpvoid_t output_buffer, dword_t output_count) {
-  output_buffer.Zero(output_count * sizeof(char16_t));
+dword_result_t XamQueryLiveHiveA_entry(
+    lpstring_t feature_name, lpstring_t value_ptr, dword_t value_buffer_size,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!feature_name || !value_ptr || !value_buffer_size) {
+    return X_E_INVALIDARG;
+  }
 
-  auto tp = xe::chrono::WinSystemClock::to_sys(
-      xe::chrono::WinSystemClock::from_file_time(filetime));
-  auto dp = date::floor<date::days>(tp);
-  auto year_month_day = date::year_month_day{dp};
+  auto run = [=](uint32_t& extended_error, uint32_t& length) {
+    extended_error = X_ERROR_SUCCESS;
+    length = 0;
 
-  auto str = fmt::format(u"{:02d}/{:02d}/{}",
-                         static_cast<unsigned>(year_month_day.month()),
-                         static_cast<unsigned>(year_month_day.day()),
-                         static_cast<int>(year_month_day.year()));
-  xe::string_util::copy_and_swap_truncating(output_buffer.as<char16_t*>(), str,
-                                            output_count);
+    std::memset(value_ptr, 0, value_buffer_size);
+
+    std::string value = "";
+
+    if (feature_name.value() == "SearchKillSwitch") {
+      value = "";
+    } else if (feature_name.value() == "SearchOnlineRecUnavailableLocales") {
+      // value = "fr-ch,de-ch";
+    } else if (feature_name.value() == "SearchUnavailableLocales") {
+      value = "";
+    } else if (feature_name.value() == "SearchSpeechURL") {
+      value = "https://ssl.bing.com/speechreco/xbox/query";
+    } else if (feature_name.value() == "DisplayCurrencyBalanceOnDash") {
+      value = "1";
+    } else if (feature_name.value() == "TFAEnabled") {
+      value = "1";
+    } else if (feature_name.value() == "CatalogUriRoot") {
+      value = "http://catalog.xboxlive.com";
+    } else if (feature_name.value() == "CatalogCDNUriRoot") {
+      value = "http://catalog-cdn.xboxlive.com";
+    } else if (feature_name.value() == "CatalogCDNUriPort") {
+      value = "80";
+    } else if (feature_name.value() == "NielsenSoundEnabled") {
+      value = "1";
+    } else {
+      assert_always();
+      XELOGI("Unknown Feature: {}", feature_name.value());
+    }
+
+    xe::string_util::copy_truncating(value_ptr, value, value_buffer_size);
+
+    return X_ERROR_SUCCESS;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t extended_error, length;
+    X_RESULT result = run(extended_error, length);
+
+    return result == X_ERROR_SUCCESS ? result : extended_error;
+  }
+
+  kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+  return X_ERROR_IO_PENDING;
 }
-DECLARE_XAM_EXPORT1(XamFormatDateString, kNone, kImplemented);
+DECLARE_XAM_EXPORT1(XamQueryLiveHiveA, kMisc, kStub);
 
-void XamFormatTimeString_entry(dword_t user_index, qword_t filetime,
-                               lpvoid_t output_buffer, dword_t output_count) {
-  output_buffer.Zero(output_count * sizeof(char16_t));
+dword_result_t XamGetLiveHiveValueA_entry(
+    lpstring_t feature_name, lpstring_t value_ptr, dword_t value_buffer_size,
+    dword_t unk, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!feature_name || !value_ptr || !value_buffer_size) {
+    return X_E_INVALIDARG;
+  }
 
-  auto tp = xe::chrono::WinSystemClock::to_sys(
-      xe::chrono::WinSystemClock::from_file_time(filetime));
-  auto dp = date::floor<date::days>(tp);
-  auto time = date::hh_mm_ss{date::floor<std::chrono::milliseconds>(tp - dp)};
+  auto run = [=](uint32_t& extended_error, uint32_t& length) {
+    extended_error = X_ERROR_SUCCESS;
+    length = 0;
 
-  auto str = fmt::format(u"{:02d}:{:02d}", time.hours().count(),
-                         time.minutes().count());
-  xe::string_util::copy_and_swap_truncating(output_buffer.as<char16_t*>(), str,
-                                            output_count);
+    std::memset(value_ptr, 0, value_buffer_size);
+
+    std::string data;
+
+    if (feature_name.value() == "AvatarPhotoBoothEnabled") {
+      data = "1";
+    } else if (feature_name.value() == "AvatarMarketplaceEnabled") {
+      data = "0";
+    } else if (feature_name.value() == "AvatarAssetRefreshFrequency") {
+      data = "100";
+    } else if (feature_name.value() == "CompanionBlacklist") {
+      // 58411457
+      // List?
+    } else if (feature_name.value() == "UseDashGamertagChangeApp") {
+      data = "1";
+    } else if (feature_name.value() == "SysExtRevocationList") {
+      data = "00D8B517FD2E27C62C866B041492CCD391085C3B";
+    } else {
+      assert_always();
+      XELOGI("Unknown Feature: {}", feature_name.value());
+    }
+
+    xe::string_util::copy_truncating(value_ptr, data, value_buffer_size);
+
+    return X_ERROR_SUCCESS;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t extended_error, length;
+    X_RESULT result = run(extended_error, length);
+
+    return result == X_ERROR_SUCCESS ? result : extended_error;
+  }
+
+  kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+  return X_ERROR_IO_PENDING;
 }
-DECLARE_XAM_EXPORT1(XamFormatTimeString, kNone, kImplemented);
+DECLARE_XAM_EXPORT1(XamGetLiveHiveValueA, kMisc, kStub);
+
+dword_result_t XamGetLiveHiveValueW_entry(
+    lpu16string_t feature_name, lpu16string_t value_ptr,
+    dword_t value_buffer_size, dword_t unk,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!feature_name || !value_ptr || !value_buffer_size) {
+    return X_E_INVALIDARG;
+  }
+
+  auto run = [=](uint32_t& extended_error, uint32_t& length) {
+    extended_error = X_ERROR_SUCCESS;
+    length = 0;
+
+    std::memset(value_ptr, 0, value_buffer_size);
+
+    const std::u16string native_feature_name =
+        xe::string_util::read_u16string_and_swap(feature_name);
+
+    std::u16string data;
+
+    if (native_feature_name == u"GameImageAssetUriRoot") {
+      data = u"http://tiles.xbox.com/consoleAssets";
+    } else if (native_feature_name == u"EpixReportingEnabled") {
+      data = u"1";
+    } else if (native_feature_name == u"EpixFailSafeEnabled") {
+      data = u"0";
+    } else if (native_feature_name == u"EpixShallowEnabled") {
+      data = u"0";
+    } else if (native_feature_name == u"EpixPollFrequencyInMinutes") {
+      data = u"240";
+    } else if (native_feature_name == u"EpixManifestUriPath") {
+      data = u"/epix/$locale/";
+    } else if (native_feature_name == u"EpixPreviewUriRoot") {
+      data = u"http://epix-preview.xbox.com";
+    } else if (native_feature_name == u"EpixUriRoot") {
+      data = u"http://epix.xbox.com";
+    } else if (native_feature_name == u"EpixAvatarConfigPath") {
+      data = u"/consoleassets/vm_ems/avatarbitmask.txt";
+    } else if (native_feature_name == u"XSignerMinimumVersion") {
+      data = u"0";
+    } else if (native_feature_name == u"MarketplaceLibraryEnabled") {
+      data = u"1";
+    } else {
+      assert_always();
+      XELOGI("Unknown Feature: {}", xe::to_utf8(native_feature_name));
+    }
+
+    xe::string_util::copy_and_swap_truncating(value_ptr, data,
+                                              value_buffer_size);
+
+    return X_ERROR_SUCCESS;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t extended_error, length;
+    X_RESULT result = run(extended_error, length);
+
+    return result == X_ERROR_SUCCESS ? result : extended_error;
+  }
+
+  kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+  return X_ERROR_IO_PENDING;
+}
+DECLARE_XAM_EXPORT1(XamGetLiveHiveValueW, kMisc, kStub);
+
+dword_result_t XamGetErrorStringFromWebService_entry(
+    dword_t status_code_desc_address, dword_t buffer_size, dword_t status_code,
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!status_code_desc_address || !buffer_size || !status_code) {
+    return X_E_INVALIDARG;
+  }
+
+  char16_t* status_code_desc_ptr =
+      kernel_state()->memory()->TranslateVirtual<char16_t*>(
+          status_code_desc_address);
+
+  auto run = [=](uint32_t& length, uint32_t& extended_error) -> X_RESULT {
+    length = 0;
+    extended_error = X_E_SUCCESS;
+
+    std::memset(status_code_desc_ptr, 0, buffer_size);
+
+    return X_E_SUCCESS;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t length, extended_error;
+    return run(length, extended_error);
+  }
+
+  kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+  return X_ERROR_IO_PENDING;
+}
+DECLARE_XAM_EXPORT1(XamGetErrorStringFromWebService, kMisc, kStub);
 
 dword_result_t keXamBuildResourceLocator(uint64_t module,
                                          const std::u16string& container,
@@ -225,13 +371,71 @@ dword_result_t XamGetCachedTitleName_entry(dword_t title_id,
 }
 DECLARE_XAM_EXPORT1(XamGetCachedTitleName, kNone, kImplemented);
 
+dword_result_t XamReadString_entry(dword_t title_id, qword_t id,
+                                   dword_t user_index, dword_t string_out_ptr,
+                                   lpdword_t string_size_ptr,
+                                   pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!string_out_ptr || id == 0xFFFF) {
+    return X_E_INVALIDARG;
+  }
+
+  if (!string_size_ptr) {
+    return X_E_INSUFFICIENT_BUFFER;
+  }
+
+  auto run = [=](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
+    X_STATUS result = X_ERROR_SUCCESS;
+
+    // 584111F7 reads leaderboard strings
+    const std::u16string localized_string = xe::to_utf16(
+        kernel_state()->emulator()->game_info_database()->GetLocalizedString(
+            static_cast<uint32_t>(id)));
+
+    const size_t str_buffer_size = *string_size_ptr;
+
+    char16_t* str_buffer =
+        kernel_memory()->TranslateVirtual<char16_t*>(string_out_ptr);
+
+    xe::string_util::copy_and_swap_truncating(str_buffer, localized_string,
+                                              str_buffer_size);
+
+    extended_error = X_HRESULT_FROM_WIN32(result);
+    length = 0;
+
+    return result;
+  };
+
+  if (!overlapped_ptr) {
+    uint32_t extended_error, length = 0;
+    return run(extended_error, length);
+  }
+
+  kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+  return X_ERROR_IO_PENDING;
+}
+DECLARE_XAM_EXPORT1(XamReadString, kNone, kImplemented);
+
 dword_result_t XamGetSystemVersion_entry() {
   // eh, just picking one. If we go too low we may break new games, but
   // this value seems to be used for conditionally loading symbols and if
   // we pretend to be old we have less to worry with implementing.
-  // 0x200A3200
-  // 0x20096B00
-  return 0;
+  // 0x200A3200 = 2.0.2610.0
+  // 0x20096B00 = 2.0.2411.0
+  // 0x200CE900 = 2.0.3305.0
+  // Latest
+  // https://support.xbox.com/en-GB/help/xbox-360/console/system-update-operating-system
+  // 0x20449700 = 2.0.17559.0
+
+  auto ver = 0x20449700;
+
+  // auto version = fmt::format("Kernel version: {}.{}.{}.{}", (ver >> 28) &
+  // 0xF,
+  //                            (ver >> 24) & 0xF, (ver >> 8) & 0xFFFF, ver &
+  //                            0xF);
+
+  // XELOGD("{}", version);
+
+  return ver;
 }
 DECLARE_XAM_EXPORT1(XamGetSystemVersion, kNone, kStub);
 
@@ -251,61 +455,6 @@ dword_result_t XGetAVPack_entry() {
   return (cvars::avpack);
 }
 DECLARE_XAM_EXPORT1(XGetAVPack, kNone, kStub);
-
-uint32_t xeXGetGameRegion() {
-  static uint32_t constexpr table[] = {
-      0xFFFFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x02FEu, 0x0201u, 0x03FFu,
-      0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu,
-      0x00FFu, 0xFFFFu, 0x02FEu, 0x03FFu, 0x0102u, 0x03FFu, 0x03FFu, 0x02FEu,
-      0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu, 0x02FEu,
-      0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu,
-      0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu,
-      0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu, 0x0101u, 0x03FFu, 0x03FFu,
-      0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu,
-      0x03FFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x0102u, 0x03FFu, 0x00FFu,
-      0x03FFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x0201u, 0x03FFu, 0x03FFu, 0x03FFu,
-      0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu, 0x02FEu, 0x03FFu, 0x03FFu, 0x02FEu,
-      0x02FEu, 0x03FFu, 0x02FEu, 0x03FFu, 0x02FEu, 0x02FEu, 0xFFFFu, 0x03FFu,
-      0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu, 0x03FFu, 0x02FEu, 0x00FFu,
-      0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu};
-  auto country = static_cast<uint8_t>(cvars::user_country);
-  return country < xe::countof(table) ? table[country] : 0xFFFFu;
-}
-
-dword_result_t XGetGameRegion_entry() { return xeXGetGameRegion(); }
-DECLARE_XAM_EXPORT1(XGetGameRegion, kNone, kStub);
-
-XLanguage xeGetLanguage(bool extended_languages_support) {
-  auto desired_language = static_cast<XLanguage>(cvars::user_language);
-  uint32_t region = xeXGetGameRegion();
-  auto max_languages = extended_languages_support ? XLanguage::kMaxLanguages
-                                                  : XLanguage::kSChinese;
-  if (desired_language < max_languages) {
-    return desired_language;
-  }
-  if ((region & 0xff00) != 0x100) {
-    return XLanguage::kEnglish;
-  }
-  switch (region) {
-    case 0x101:  // NTSC-J (Japan)
-      return XLanguage::kJapanese;
-    case 0x102:  // NTSC-J (China)
-      return extended_languages_support ? XLanguage::kSChinese
-                                        : XLanguage::kEnglish;
-    default:
-      return XLanguage::kKorean;
-  }
-}
-
-dword_result_t XGetLanguage_entry() {
-  return static_cast<uint32_t>(xeGetLanguage(false));
-}
-DECLARE_XAM_EXPORT1(XGetLanguage, kNone, kImplemented);
-
-dword_result_t XamGetLanguage_entry() {
-  return static_cast<uint32_t>(xeGetLanguage(true));
-}
-DECLARE_XAM_EXPORT1(XamGetLanguage, kNone, kImplemented);
 
 dword_result_t XamGetCurrentTitleId_entry() {
   return kernel_state()->emulator()->title_id();
@@ -337,7 +486,6 @@ DECLARE_XAM_EXPORT1(XamGetExecutionId, kNone, kImplemented);
 dword_result_t XamLoaderSetLaunchData_entry(lpvoid_t data, dword_t size) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
   auto& loader_data = xam->loader_data();
-  loader_data.launch_data_present = size ? true : false;
   loader_data.launch_data.resize(size);
   std::memcpy(loader_data.launch_data.data(), data, size);
   return 0;
@@ -351,7 +499,7 @@ dword_result_t XamLoaderGetLaunchDataSize_entry(lpdword_t size_ptr) {
 
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
   auto& loader_data = xam->loader_data();
-  if (!loader_data.launch_data_present) {
+  if (loader_data.launch_data.empty()) {
     *size_ptr = 0;
     return X_ERROR_NOT_FOUND;
   }
@@ -365,7 +513,7 @@ dword_result_t XamLoaderGetLaunchData_entry(lpvoid_t buffer_ptr,
                                             dword_t buffer_size) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
   auto& loader_data = xam->loader_data();
-  if (!loader_data.launch_data_present) {
+  if (loader_data.launch_data.empty()) {
     return X_ERROR_NOT_FOUND;
   }
 
@@ -382,25 +530,43 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
   auto& loader_data = xam->loader_data();
   loader_data.launch_flags = flags;
 
+  std::string title;
+  std::string message;
+
   // Translate the launch path to a full path.
   if (raw_name_ptr && !raw_name_ptr.value().empty()) {
     loader_data.launch_path = xe::path_to_utf8(raw_name_ptr.value());
-    loader_data.launch_data_present = true;
     xam->SaveLoaderData();
-
-    auto display_window = kernel_state()->emulator()->display_window();
-    auto imgui_drawer = kernel_state()->emulator()->imgui_drawer();
-
-    if (display_window && imgui_drawer) {
-      display_window->app_context().CallInUIThreadSynchronous([imgui_drawer]() {
-        xe::ui::ImGuiDialog::ShowMessageBox(
-            imgui_drawer, "Title was restarted",
-            "Title closed with new launch data. \nPlease restart Xenia. "
-            "Game will be loaded automatically.");
-      });
-    }
+    title = "Title was restarted";
+    message =
+        "Title closed with new launch data. \nPlease restart Xenia. "
+        "Game will be loaded automatically.";
   } else {
+    title = "Title terminated";
+    message = "Game requested exit to dashboard.";
     assert_always("Game requested exit to dashboard via XamLoaderLaunchTitle");
+  }
+
+  auto display_window = kernel_state()->emulator()->display_window();
+  auto imgui_drawer = kernel_state()->emulator()->imgui_drawer();
+
+  if (display_window && imgui_drawer) {
+    display_window->app_context().CallInUIThreadSynchronous(
+        [imgui_drawer, title, message]() {
+          auto dialog = xe::ui::ImGuiDialog::ShowMessageBox(
+              imgui_drawer, title.c_str(), message.c_str());
+
+          std::jthread([dialog]() {
+            while (!dialog->IsClosing()) {
+              std::this_thread::yield();
+            }
+
+            config::SaveConfig();
+            xe::FlushLog();
+
+            std::quick_exit(0);
+          }).detach();
+        });
   }
 
   // This function does not return.
@@ -528,6 +694,18 @@ DECLARE_XAM_EXPORT1(RtlSetLastNTError, kNone, kImplemented);
 
 dword_result_t RtlGetLastError_entry() { return XThread::GetLastError(); }
 DECLARE_XAM_EXPORT1(RtlGetLastError, kNone, kImplemented);
+
+dword_result_t XGetOverlappedExtendedError_entry(
+    pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  if (!overlapped_ptr) {
+    return XThread::GetLastError();
+  }
+  if (overlapped_ptr->result == X_ERROR_IO_PENDING) {
+    return X_ERROR_IO_INCOMPLETE;
+  }
+  return static_cast<uint32_t>(overlapped_ptr->extended_error);
+}
+DECLARE_XAM_EXPORT1(XGetOverlappedExtendedError, kNone, kImplemented);
 
 dword_result_t GetLastError_entry() { return RtlGetLastError_entry(); }
 DECLARE_XAM_EXPORT1(GetLastError, kNone, kImplemented);
@@ -675,11 +853,11 @@ dword_result_t XGetAudioFlags_entry() {
     return 2;
   }
 
-  if (!cvars::audio_flag) {
-    return 0x10000 | 0x1;
-  }
+  const auto audio_flags = kernel_state()->xconfig()->ReadSetting<uint32_t>(
+      XCONFIG_USER_CATEGORY,
+      XCONFIG_USER_CATEGORY_ENTRIES::XCONFIG_USER_AUDIO_FLAGS);
 
-  return cvars::audio_flag;
+  return audio_flags ? audio_flags : 0x10000 | 0x1;
 }
 DECLARE_XAM_EXPORT1(XGetAudioFlags, kNone, kImplemented);
 
@@ -807,6 +985,78 @@ DECLARE_XAM_EXPORT1(XamDoesOmniNeedConfiguration, kNone, kStub);
 
 dword_result_t XamFirstRunExperienceShouldRun_entry() { return 0; }
 DECLARE_XAM_EXPORT1(XamFirstRunExperienceShouldRun, kNone, kStub);
+
+dword_result_t QueryPerformanceFrequency_entry(lpqword_t query) {
+  // Copied from KeQueryPerformanceFrequency
+  uint64_t result = Clock::guest_tick_frequency();
+  *query = static_cast<uint32_t>(result);
+  return 1;
+}
+DECLARE_XAM_EXPORT1(QueryPerformanceFrequency, kNone, kImplemented);
+
+void GetSystemTimeAsFileTime_entry(lpqword_t time_ptr,
+                                   const ppc_context_t& ctx) {
+  if (time_ptr) {
+    // Copied from KeQuerySystemTime
+    // update the timestamp bundle to the time we queried.
+    // this is a race, but i don't of any sw that requires it, it just seems
+    // like we ought to keep it consistent with ketimestampbundle in case
+    // something uses this function, but also reads it directly
+    uint32_t ts_bundle = ctx->kernel_state->GetKeTimestampBundle();
+    uint64_t time = Clock::QueryGuestSystemTime();
+    // todo: cmpxchg?
+    ctx->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(ts_bundle)->system_time =
+        xe::byte_swap(time);
+    *time_ptr = time;
+  }
+}
+DECLARE_XAM_EXPORT1(GetSystemTimeAsFileTime, kNone, kImplemented);
+
+dword_result_t XamIsIptvEnabled_entry() {
+  const bool iptv_enabled =
+      kernel_state()->xconfig()->ReadSetting<uint32_t>(
+          X_CONFIG_CATEGORY::XCONFIG_USER_CATEGORY, XCONFIG_USER_RETAIL_FLAGS) &
+      X_RETAIL_FLAGS::IPTVEnabled;
+
+  return !iptv_enabled ? X_E_FAIL : X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamIsIptvEnabled, kNone, kImplemented);
+
+dword_result_t XamIptvGetServiceName_entry(lpdword_t service_name_ptr) {
+  auto address = kernel_state()->xam_state()->GetIptvNameAddress();
+  auto buffer = kernel_state()->memory()->TranslateVirtual(address);
+  char16_t* data_ptr = reinterpret_cast<char16_t*>(buffer);
+  kernel_state()->xconfig()->ReadSetting(
+      X_CONFIG_CATEGORY::XCONFIG_IPTV_CATEGORY,
+      XCONFIG_IPTV_SERVICE_PROVIDER_NAME, data_ptr);
+  if (*data_ptr == u'\0') {
+    xe::string_util::copy_and_swap_truncating(data_ptr, u"Xenia TV", 9);
+  }
+  *service_name_ptr = address;
+
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamIptvGetServiceName, kNone, kImplemented);
+
+dword_result_t XamGetDvrStorage_entry(lpdword_t dvr_storage,
+                                      lpdword_t used_dvr_storage,
+                                      lpdword_t hdd_unused_space) {
+  *dvr_storage = 0;
+  *used_dvr_storage = 0;
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamGetDvrStorage, kNone, kStub);
+
+dword_result_t XamSetDvrStorage_entry(
+    dword_t dvr_storage_size, pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamSetDvrStorage, kNone, kStub);
+
+dword_result_t XamLookupCommonStringByIndex_entry(dword_t string_index) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamLookupCommonStringByIndex, kNone, kImplemented);
 
 }  // namespace xam
 }  // namespace kernel

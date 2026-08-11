@@ -421,6 +421,7 @@ void ImGuiDrawer::Initialize() {
 
   auto& io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
   const float font_size = std::max((float)cvars::font_size, 8.f);
   const float title_font_size = font_size + 6.f;
@@ -587,6 +588,7 @@ void ImGuiDrawer::SetupNotificationTextures() {
   }
 }
 
+// https://everythingfonts.com/unicode/maps
 static constexpr ImWchar font_glyph_ranges[] = {
     0x0020, 0x00FF,  // Basic Latin + Latin Supplement
     0x0100, 0x024F,  // Extended Latin
@@ -594,8 +596,13 @@ static constexpr ImWchar font_glyph_ranges[] = {
     0x0400, 0x04FF,  // Cyrillic
     0x2000, 0x206F,  // General Punctuation
     0x2070, 0x209F,  // Superscripts & Subscripts
+    0x20A0, 0x20CF,  // Currency Symbols
     0x2100, 0x214F,  // Letterlike Symbols
     0x2150, 0x218F,  // Number Forms
+    0x2500, 0x257F,  // Box Drawing
+    0x2580, 0x259F,  // Block Elements
+    0x25A0, 0x25FF,  // Geometric Shapes
+    0x2600, 0x26FF,  // Miscellaneous Symbols
     0,
 };
 
@@ -807,7 +814,8 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
   if (immediate_drawer_) {
     GetIO().Fonts->TexID = reinterpret_cast<ImTextureID>(nullptr);
     font_texture_.reset();
-
+    locked_achievement_icon_.reset();
+    loading_tile_icon_.reset();
     notification_icon_textures_.clear();
   }
   immediate_drawer_ = new_immediate_drawer;
@@ -822,6 +830,16 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
                                        locked_achievement_icon.second, &width,
                                        &height, &channels, STBI_rgb_alpha);
     locked_achievement_icon_ = immediate_drawer_->CreateTexture(
+        width, height, ImmediateTextureFilter::kLinear, true,
+        reinterpret_cast<uint8_t*>(image_data));
+
+    stbi_image_free(image_data);
+
+    // Load loading tile icon.
+    image_data =
+        stbi_load_from_memory(loading_tile_icon.first, loading_tile_icon.second,
+                              &width, &height, &channels, STBI_rgb_alpha);
+    loading_tile_icon_ = immediate_drawer_->CreateTexture(
         width, height, ImmediateTextureFilter::kLinear, true,
         reinterpret_cast<uint8_t*>(image_data));
 

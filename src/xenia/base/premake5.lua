@@ -10,6 +10,9 @@ project("xenia-base")
   })
   local_platform_files()
   removefiles({
+    "*_arm64.cc",
+  })
+  removefiles({
     "console_app_main_*.cc",
     "main_init_*.cc",
   })

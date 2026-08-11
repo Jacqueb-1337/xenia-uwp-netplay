@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2025 Xenia Canary. All rights reserved.                          *
+ * Copyright 2026 Xenia Canary. All rights reserved.                          *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,8 +10,13 @@
 #ifndef XENIA_KERNEL_XAM_UNMARSHALLER_UNMARSHALLER_H_
 #define XENIA_KERNEL_XAM_UNMARSHALLER_UNMARSHALLER_H_
 
-#include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/unmarshaller/xlivebase_task.h"
+
+namespace xe {
+namespace kernel {
+class KernelState;
+}  // namespace kernel
+}  // namespace xe
 
 namespace xe {
 namespace kernel {
@@ -46,36 +51,40 @@ class Unmarshaller {
 
   std::string ReadString(uint32_t length);
 
-  virtual X_HRESULT Deserialize();
+  virtual X_HRESULT Deserialize() = 0;
 
   template <typename T>
   T* DeserializeReinterpret() {
-    return async_task_->DeserializeReinterpret<T>();
+    return async_task_.DeserializeReinterpret<T>();
   };
 
   template <typename T>
   T* Results() const {
-    return async_task_->Results<T>();
+    return async_task_.Results<T>();
   };
 
-  bool ZeroResults() const { return async_task_->ZeroResults(); };
+  bool ZeroResults() const;
 
   XLIVEBASE_ASYNC_MESSAGE* GetXLiveBaseAsyncMessage();
 
-  XLivebaseAsyncTask* GetAsyncTask();
+  XLivebaseAsyncTask GetAsyncTask() const;
 
   size_t GetPosition() const;
 
-  ~Unmarshaller() {};
-
  protected:
-  Unmarshaller(uint32_t marshaller_buffer);
+  Unmarshaller(KernelState* kernel_state, uint32_t marshaller_buffer);
+  ~Unmarshaller() = default;
 
-  XLIVEBASE_ASYNC_MESSAGE* xlivebase_async_message_ptr_;
-  XLivebaseAsyncTask* async_task_;
+  KernelState* kernel_state_ = nullptr;
+  Memory* memory_ = nullptr;
+
+  XLIVEBASE_ASYNC_MESSAGE* xlivebase_async_message_ptr_ = nullptr;
+  XLivebaseAsyncTask async_task_;
 
  private:
-  size_t position_;
+  uint32_t GetAsyncTaskAddress(uint32_t marshaller_address) const;
+
+  size_t position_ = 0;
 };
 
 }  // namespace xam

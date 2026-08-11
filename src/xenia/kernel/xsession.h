@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2024 Xenia Emulator. All rights reserved.                        *
+ * Copyright 2026 Xenia Canary. All rights reserved.                          *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -12,9 +12,9 @@
 
 #include "xenia/base/byte_order.h"
 #include "xenia/kernel/json/session_object_json.h"
-#include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/xlast.h"
 #include "xenia/kernel/xam/user_property.h"
+#include "xenia/kernel/xnet.h"
 #include "xenia/kernel/xobject.h"
 
 namespace xe {
@@ -32,6 +32,7 @@ enum SessionFlags {
   JOIN_VIA_PRESENCE_DISABLED = 0x0200,
   JOIN_IN_PROGRESS_DISABLED = 0x0400,
   JOIN_VIA_PRESENCE_FRIENDS_ONLY = 0x0800,
+  UNKNOWN = 0x1000,  // 584113DB, 4156091D and 5841128F sets this flag?
 
   SINGLEPLAYER_WITH_STATS = PRESENCE | STATS | INVITES_DISABLED |
                             JOIN_VIA_PRESENCE_DISABLED |
@@ -41,8 +42,23 @@ enum SessionFlags {
   LIVE_MULTIPLAYER_RANKED = LIVE_MULTIPLAYER_STANDARD | ARBITRATION,
   SYSTEMLINK = PEER_NETWORK,
   GROUP_LOBBY = PRESENCE | PEER_NETWORK,
-  GROUP_GAME = STATS | MATCHMAKING | PEER_NETWORK
+  GROUP_GAME = STATS | MATCHMAKING | PEER_NETWORK,
+
+  // HELPERS
+  SYSTEMLINK_FEATURES = HOST | SYSTEMLINK,
+  LIVE_FEATURES = PRESENCE | STATS | MATCHMAKING | ARBITRATION
 };
+
+inline bool IsOfflineSession(const SessionFlags flags) { return !flags; }
+
+inline bool IsXboxLiveSession(const SessionFlags flags) {
+  return !IsOfflineSession(flags) && flags & SessionFlags::LIVE_FEATURES;
+}
+
+inline bool IsSystemlinkSession(const SessionFlags flags) {
+  return !IsOfflineSession(flags) && !IsXboxLiveSession(flags) &&
+         flags & SessionFlags::SYSTEMLINK_FEATURES;
+}
 
 enum STATE_FLAGS : uint32_t {
   STATE_FLAGS_CREATED = 0x01,
@@ -265,6 +281,7 @@ class XSession : public XObject {
   X_RESULT RegisterArbitration(XGI_SESSION_ARBITRATION* data);
   X_RESULT ModifySkill(XGI_SESSION_MODIFYSKILL* data);
   X_RESULT WriteStats(XGI_STATS_WRITE* data);
+  X_RESULT FlushStats();
 
   X_RESULT StartSession(XGI_SESSION_STATE* state);
   X_RESULT EndSession(XGI_SESSION_STATE* state);
@@ -275,28 +292,37 @@ class XSession : public XObject {
   static X_RESULT GetWeightedSessions(KernelState* kernel_state,
                                       XGI_SESSION_SEARCH_WEIGHTED* search_data,
                                       uint32_t num_users);
-  static X_RESULT GetSessionByID(Memory* memory,
+  static X_RESULT GetSessionByID(KernelState* kernel_state,
                                  XGI_SESSION_SEARCH_BYID* search_data);
-  static X_RESULT GetSessionByIDs(Memory* memory,
+  static X_RESULT GetSessionByIDs(KernelState* kernel_state,
                                   XGI_SESSION_SEARCH_BYIDS* search_data);
-  static X_RESULT GetSessionByIDs(Memory* memory, XNKID* session_ids_ptr,
+  static X_RESULT GetSessionByIDs(KernelState* kernel_state,
+                                  XNKID* session_ids_ptr,
                                   uint32_t num_session_ids,
                                   uint32_t search_results_ptr,
                                   uint32_t results_buffer_size);
 
-  bool HasOfflineFlags() const { return !local_details_.Flags; }
-
-  bool HasSystemlinkFlags() const {
-    // STATS
-    const uint32_t systemlink = HOST | PEER_NETWORK;
-
-    return !HasOfflineFlags() && (local_details_.Flags & ~systemlink) == 0;
+  bool IsOfflineSession() const {
+    return kernel::IsOfflineSession(
+        static_cast<SessionFlags>(local_details_.Flags.get()));
   }
 
-  bool HasXboxLiveFeatureFlags() const {
-    const uint8_t live_features = PRESENCE | STATS | MATCHMAKING | ARBITRATION;
+  bool IsXboxLiveSession() {
+    return kernel::IsXboxLiveSession(
+        static_cast<SessionFlags>(local_details_.Flags.get()));
+  }
 
-    return !HasOfflineFlags() && (local_details_.Flags & live_features);
+  inline bool IsSystemlinkSession() {
+    return kernel::IsSystemlinkSession(
+        static_cast<SessionFlags>(local_details_.Flags.get()));
+  }
+
+  static bool HasUsesFlags(uint32_t flags) {
+    return flags & X_SESSION_CREATE_USES_MASK;
+  }
+
+  static bool HasModifersFlags(uint32_t flags) {
+    return flags & X_SESSION_CREATE_MODIFIERS_MASK;
   }
 
   const uint32_t GetMembersCount() const {
@@ -317,30 +343,6 @@ class XSession : public XObject {
     return members_size;
   }
 
-  const xe::be<uint32_t> GetGameModeValue(uint64_t xuid) {
-    const xam::Property* gamemode =
-        kernel_state()->xam_state()->user_tracker()->GetProperty(
-            xuid, XCONTEXT_GAME_MODE);
-
-    if (gamemode) {
-      return gamemode->get_data()->data.u32;
-    }
-
-    return 0;
-  }
-
-  const xe::be<uint32_t> GetGameTypeValue(uint64_t xuid) {
-    const xam::Property* game_type =
-        kernel_state()->xam_state()->user_tracker()->GetProperty(
-            xuid, XCONTEXT_GAME_TYPE);
-
-    if (game_type) {
-      return game_type->get_data()->data.u32;
-    }
-
-    return 0;
-  }
-
   const bool IsCreated() const {
     return (state_ & STATE_FLAGS_CREATED) == STATE_FLAGS_CREATED;
   }
@@ -357,15 +359,41 @@ class XSession : public XObject {
     return (state_ & STATE_FLAGS_DELETED) == STATE_FLAGS_DELETED;
   }
 
-  const bool IsValidModifyFlags(uint32_t flags) const {
-    const uint32_t allowed_modify_flags =
-        JOIN_IN_PROGRESS_DISABLED | JOIN_VIA_PRESENCE_FRIENDS_ONLY |
-        JOIN_VIA_PRESENCE_DISABLED | INVITES_DISABLED | ARBITRATION;
+  bool IsPresenceEnabled() const;
 
-    const uint32_t changed_flags = local_details_.Flags ^ flags;
+  bool IsJoinViaPresenceEnabled() const;
 
-    return (changed_flags & ~allowed_modify_flags) == 0;
+  bool IsJoinViaPresenceFriendsOnly() const;
+
+  bool IsJoinInProgressEnabled() const;
+
+  bool IsInvitesEnabled() const;
+
+  bool IsSessionStarted() const;
+
+  bool IsSessionEnded() const;
+
+  uint64_t GetSessionID() const { return session_id_; };
+
+  uint32_t GetTotalMaxSlots() const {
+    return local_details_.MaxPublicSlots + local_details_.MaxPrivateSlots;
   }
+
+  XSESSION_INFO GetSessionInfo() const { return local_details_.sessionInfo; };
+
+  XSESSION_LOCAL_DETAILS GetSessionDetails() const { return local_details_; };
+
+  // Gets XUID of the owner managing the local session
+  uint64_t GetOwnerXUID() const { return owner_xuid_; };
+
+  // Cache latest properties sent to backend
+  void CacheLiveProperties(std::vector<xam::Property> properties) {
+    live_properties_ = properties;
+  };
+
+  std::vector<xam::Property> GetCachedLiveProperties() {
+    return live_properties_;
+  };
 
  private:
   void PrintSessionDetails();
@@ -384,12 +412,8 @@ class XSession : public XObject {
     return (flags & checked_flag) == checked_flag;
   };
 
-  static void GetXnAddrFromSessionObject(SessionObjectJSON* session,
-                                         XNADDR* XnAddr_ptr);
-
-  static void FillSessionSearchResult(
-      const std::unique_ptr<SessionObjectJSON>& session_info,
-      XSESSION_SEARCHRESULT* result);
+  static void FillSessionSearchResult(const SessionObjectJSON session_info,
+                                      XSESSION_SEARCHRESULT* result);
 
   static void FillSessionContext(Memory* memory, uint32_t matchmaking_index,
                                  util::XLastMatchmakingQuery* matchmaking_query,
@@ -405,6 +429,12 @@ class XSession : public XObject {
       xam::XUSER_PROPERTY* filter_properties_ptr,
       XSESSION_SEARCHRESULT* result);
 
+  void NotifySessionCreationWarning(uint32_t user_index) const;
+
+  uint64_t owner_xuid_;
+
+  std::vector<xam::Property> live_properties_;
+
   // uint64_t migrated_session_id_;
   uint64_t session_id_ = 0;
   uint32_t state_ = 0;
@@ -414,9 +444,10 @@ class XSession : public XObject {
   std::map<uint64_t, XSESSION_MEMBER> local_members_{};
   std::map<uint64_t, XSESSION_MEMBER> remote_members_{};
 
-  // TODO!
-  std::vector<uint8_t> stats_;
+  // Cached stats
+  view_properties_unordered_map cached_stats_properties_ = {};
 };
+
 }  // namespace kernel
 }  // namespace xe
 

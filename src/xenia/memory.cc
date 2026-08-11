@@ -28,6 +28,19 @@
 
 DEFINE_bool(protect_zero, true, "Protect the zero page from reads and writes.",
             "Memory");
+DEFINE_bool(emit_inline_mmio_checks, false,
+            "Emit inline MMIO range checks for all I32 loads/stores instead "
+            "of relying on exception-based MMIO detection.",
+            "CPU");
+DEFINE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses, true,
+            "Uses info gathered via record_mmio_access_exceptions to emit "
+            "special stores that are faster than trapping the exception",
+            "CPU");
+DEFINE_bool(record_mmio_access_exceptions, true,
+            "For guest addresses records whether we caught any mmio accesses "
+            "for them. This info can then be used on a subsequent run to "
+            "instruct the recompiler to emit checks",
+            "CPU");
 DEFINE_bool(protect_on_release, false,
             "Protect released memory to prevent accesses.", "Memory");
 DEFINE_bool(scribble_heap, false,
@@ -86,6 +99,18 @@ void CrashDump() {
   }
   active_memory_->DumpMap();
   --in_crash_dump;
+}
+
+static inline bool ShouldSkipHostCommit(const BaseHeap& heap) {
+  // When the host page size is larger than 4 KB (e.g. 16 KB on macOS ARM64,
+  // 64 KB on some ARM64 Linux kernels), mprotect on 4 KB guest page boundaries
+  // fails with EINVAL. All heaps are backed by a shared file mapping
+  // (MapFileView) that is already mapped RW, so the commit is a no-op — skip
+  // it.
+  if (xe::memory::page_size() > 0x1000) {
+    return true;
+  }
+  return false;
 }
 
 xe::memory::PageAccess ToPageAccess(uint32_t protect) {
@@ -259,10 +284,11 @@ bool Memory::Initialize() {
   heaps_.vA0000000.Alloc(0x340000, 64 * 1024, kMemoryAllocationReserve,
                          kMemoryProtectNoAccess, true, &unk_phys_alloc);
 
-  uint32_t unknown_xex_range;  // Probably hypervisor?
+  // Allocate memory hypervisor and kernel would use
+  uint32_t hypervisor_range;
   heaps_.v80000000.Alloc(0x40000, 4 * 1024, kMemoryAllocationCommit,
                          kMemoryProtectRead | kMemoryProtectWrite, false,
-                         &unknown_xex_range);
+                         &hypervisor_range);
 
   // Value taken from 544307D5. Title explicitly access this address and this is
   // a value underneath it (It's constant between multiple runs)
@@ -502,9 +528,15 @@ uint32_t Memory::HostToGuestVirtualThunk(const void* context,
 
 uint32_t Memory::GetPhysicalAddress(uint32_t address) const {
   const BaseHeap* heap = LookupHeap(address);
-  if (!heap || heap->heap_type() != HeapType::kGuestPhysical) {
+  if (!heap) {
     return UINT32_MAX;
   }
+
+  // Assumption that we already received physical address, so just return it.
+  if (heap->heap_type() != HeapType::kGuestPhysical && address < 0x1FFFFFFF) {
+    return address;
+  }
+
   return static_cast<const PhysicalHeap*>(heap)->GetPhysicalAddress(address);
 }
 
@@ -550,11 +582,13 @@ bool Memory::AddVirtualMappedRange(uint32_t virtual_address, uint32_t mask,
                                    uint32_t size, void* context,
                                    cpu::MMIOReadCallback read_callback,
                                    cpu::MMIOWriteCallback write_callback) {
-  if (!xe::memory::AllocFixed(TranslateVirtual(virtual_address), size,
-                              xe::memory::AllocationType::kCommit,
-                              xe::memory::PageAccess::kNoAccess)) {
-    XELOGE("Unable to map range; commit/protect failed");
-    return false;
+  if (!cvars::emit_inline_mmio_checks) {
+    if (!xe::memory::AllocFixed(TranslateVirtual(virtual_address), size,
+                                xe::memory::AllocationType::kCommit,
+                                xe::memory::PageAccess::kNoAccess)) {
+      XELOGE("Unable to map range; commit/protect failed");
+      return false;
+    }
   }
   return mmio_handler_->RegisterRange(virtual_address, mask, size, context,
                                       read_callback, write_callback);
@@ -770,6 +804,10 @@ void BaseHeap::Initialize(Memory* memory, uint8_t* membase, HeapType heap_type,
   host_address_offset_ = host_address_offset;
   page_table_.resize(heap_size / page_size);
   unreserved_page_count_ = uint32_t(page_table_.size());
+
+  // Initialize free block tracker with a single block covering the entire heap.
+  free_blocks_.clear();
+  free_blocks_[0] = uint32_t(page_table_.size());
 }
 
 void BaseHeap::Dispose() {
@@ -783,6 +821,7 @@ void BaseHeap::Dispose() {
       page_number += page_entry.region_page_count;
     }
   }
+  free_blocks_.clear();
 }
 
 void BaseHeap::DumpMap() {
@@ -905,14 +944,98 @@ bool BaseHeap::Restore(ByteStream* stream) {
     }
   }
 
+  RebuildFreeBlocks();
+
   return true;
+}
+
+void BaseHeap::RebuildFreeBlocks() {
+  free_blocks_.clear();
+  uint32_t run_start = UINT32_MAX;
+  for (uint32_t i = 0; i < uint32_t(page_table_.size()); ++i) {
+    if (page_table_[i].state == 0) {
+      if (run_start == UINT32_MAX) {
+        run_start = i;
+      }
+    } else {
+      if (run_start != UINT32_MAX) {
+        free_blocks_[run_start] = i - run_start;
+        run_start = UINT32_MAX;
+      }
+    }
+  }
+  if (run_start != UINT32_MAX) {
+    free_blocks_[run_start] = uint32_t(page_table_.size()) - run_start;
+  }
+}
+
+void BaseHeap::RemoveFreeBlock(uint32_t start_page, uint32_t page_count) {
+  if (free_blocks_.empty()) {
+    return;
+  }
+
+  // Find the free block that contains the allocated range.
+  auto it = free_blocks_.upper_bound(start_page);
+  if (it != free_blocks_.begin()) {
+    --it;
+  }
+
+  // Verify the block actually contains our range.
+  uint32_t block_start = it->first;
+  uint32_t block_count = it->second;
+  uint32_t block_end = block_start + block_count;
+  assert_true(start_page >= block_start &&
+              start_page + page_count <= block_end);
+
+  free_blocks_.erase(it);
+
+  // Insert remnant before the allocated range.
+  if (block_start < start_page) {
+    free_blocks_[block_start] = start_page - block_start;
+  }
+
+  // Insert remnant after the allocated range.
+  uint32_t alloc_end = start_page + page_count;
+  if (alloc_end < block_end) {
+    free_blocks_[alloc_end] = block_end - alloc_end;
+  }
+}
+
+void BaseHeap::InsertFreeBlock(uint32_t start_page, uint32_t page_count) {
+  uint32_t new_start = start_page;
+  uint32_t new_count = page_count;
+
+  // Try to merge with block immediately after.
+  auto it_after = free_blocks_.find(start_page + page_count);
+  if (it_after != free_blocks_.end()) {
+    new_count += it_after->second;
+    free_blocks_.erase(it_after);
+  }
+
+  // Try to merge with block immediately before.
+  auto it_at = free_blocks_.lower_bound(start_page);
+  if (it_at != free_blocks_.begin()) {
+    auto it_before = std::prev(it_at);
+    if (it_before->first + it_before->second == start_page) {
+      new_start = it_before->first;
+      new_count += it_before->second;
+      free_blocks_.erase(it_before);
+    }
+  }
+
+  free_blocks_[new_start] = new_count;
 }
 
 void BaseHeap::Reset() {
   // TODO(DrChat): protect pages.
   std::memset(page_table_.data(), 0, sizeof(PageEntry) * page_table_.size());
+  unreserved_page_count_ = uint32_t(page_table_.size());
   // TODO(Triang3l): Remove access callbacks from pages if this is a physical
   // memory heap.
+
+  // Re-initialize free block tracker.
+  free_blocks_.clear();
+  free_blocks_[0] = uint32_t(page_table_.size());
 }
 
 bool BaseHeap::Alloc(uint32_t size, uint32_t alignment,
@@ -922,17 +1045,12 @@ bool BaseHeap::Alloc(uint32_t size, uint32_t alignment,
   size = xe::round_up(size, page_size_);
   alignment = xe::round_up(alignment, page_size_);
 
-  // TODO(Gliniak): Find better way to deal with this!
-  // Because 0x3XXXXXX and 0x7XXXXXX is used strictly as place for thread stacks
-  // 0x3 is probably for system threads and 0x7 for title threads
+  // Exclude the top 240MB of the v40000000 heap (64KB guest pages) from
+  // general allocation to protect the thread stack region
+  // (0x70000000-0x7F000000)
   uint32_t heap_virtual_guest_offset = 0;
-  if (heap_type_ == HeapType::kGuestVirtual) {
-    heap_virtual_guest_offset = 0x10000000;
-
-    // Adjust for 64k pages region, to prevent having a bit too little memory
-    if (page_size_ == 0x10000) {
-      heap_virtual_guest_offset = 0x0F000000;
-    }
+  if (heap_type_ == HeapType::kGuestVirtual && page_size_ == 0x10000) {
+    heap_virtual_guest_offset = 0x0F000000;
   }
 
   uint32_t low_address = heap_base_;
@@ -947,7 +1065,7 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size,
                           uint32_t protect) {
   alignment = xe::round_up(alignment, page_size_);
   size = xe::align(size, alignment);
-  assert_true(base_address % alignment == 0);
+  assert_true((base_address + host_address_offset_) % alignment == 0);
   uint32_t page_count = get_page_count(size, page_size_);
   uint32_t start_page_number = (base_address - heap_base_) / page_size_;
   uint32_t end_page_number = start_page_number + page_count - 1;
@@ -959,10 +1077,10 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size,
 
   auto global_lock = global_critical_region_.Acquire();
 
-  // - If we are reserving the entire range requested must not be already
-  //   reserved.
+  // - If we are reserving, the entire range must not be already reserved.
   // - If we are committing it's ok for pages within the range to already be
   //   committed.
+  const bool is_pure_reserve = allocation_type == kMemoryAllocationReserve;
   for (uint32_t page_number = start_page_number; page_number <= end_page_number;
        ++page_number) {
     uint32_t state = page_table_[page_number].state;
@@ -987,23 +1105,29 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size,
   if (allocation_type == kMemoryAllocationReserve) {
     // Reserve is not needed, as we are mapped already.
   } else {
-    auto alloc_type = (allocation_type & kMemoryAllocationCommit)
-                          ? xe::memory::AllocationType::kCommit
-                          : xe::memory::AllocationType::kReserve;
-    void* result = xe::memory::AllocFixed(
-        TranslateRelative(start_page_number * page_size_),
-        page_count * page_size_, alloc_type, ToPageAccess(protect));
-    if (!result) {
-      XELOGE("BaseHeap::AllocFixed failed to alloc range from host");
-      return false;
-    }
+    if (!ShouldSkipHostCommit(*this)) {
+      auto alloc_type = (allocation_type & kMemoryAllocationCommit)
+                            ? xe::memory::AllocationType::kCommit
+                            : xe::memory::AllocationType::kReserve;
+      void* result = xe::memory::AllocFixed(
+          TranslateRelative(start_page_number * page_size_),
+          page_count * page_size_, alloc_type, ToPageAccess(protect));
+      if (!result) {
+        XELOGE("BaseHeap::AllocFixed failed to alloc range from host");
+        return false;
+      }
 
-    if (cvars::scribble_heap && protect & kMemoryProtectWrite) {
-      RandomizeMemory(result, page_count * page_size_);
+      if (cvars::scribble_heap && protect & kMemoryProtectWrite) {
+        RandomizeMemory(result, page_count * page_size_);
+      }
+    } else if (cvars::scribble_heap && protect & kMemoryProtectWrite) {
+      RandomizeMemory(TranslateRelative(start_page_number * page_size_),
+                      page_count * page_size_);
     }
   }
 
   // Set page state.
+  bool had_free_pages = false;
   for (uint32_t page_number = start_page_number; page_number <= end_page_number;
        ++page_number) {
     auto& page_entry = page_table_[page_number];
@@ -1015,9 +1139,23 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size,
     page_entry.allocation_protect = protect;
     page_entry.current_protect = protect;
     if (!(page_entry.state & kMemoryAllocationReserve)) {
+      had_free_pages = true;
       unreserved_page_count_--;
     }
     page_entry.state = kMemoryAllocationReserve | allocation_type;
+  }
+
+  // Update free block tracker if any pages transitioned from free.
+  if (had_free_pages) {
+    if (is_pure_reserve) {
+      // Pure reserve: validation confirmed all pages were free, so the range
+      // is within a single coalesced free block.
+      RemoveFreeBlock(start_page_number, page_count);
+    } else {
+      // Mixed state (commit upgraded to reserve+commit): pages may span
+      // multiple free blocks, rebuild from page_table_.
+      RebuildFreeBlocks();
+    }
   }
 
   return true;
@@ -1056,88 +1194,91 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
 
   auto global_lock = global_critical_region_.Acquire();
 
-  // Find a free page range.
-  // The base page must match the requested alignment, so we first scan for
-  // a free aligned page and only then check for continuous free pages.
-  // TODO(benvanik): optimized searching (free list buckets, bitmap, etc).
+  // Find a free page range using the free block tracker.
+  // The base page must match the requested alignment.
   uint32_t start_page_number = UINT_MAX;
   uint32_t end_page_number = UINT_MAX;
-  // chrispy:todo, page_scan_stride is probably always a power of two...
   uint32_t page_scan_stride = alignment >> page_size_shift_;
-  high_page_number =
-      high_page_number - QuickMod(high_page_number, page_scan_stride);
+
   if (top_down) {
-    for (int64_t base_page_number =
-             high_page_number - xe::round_up(page_count, page_scan_stride);
-         base_page_number >= low_page_number;
-         base_page_number -= page_scan_stride) {
-      if (page_table_[base_page_number].state != 0) {
-        // Base page not free, skip to next usable page.
-        continue;
-      }
-      // Check requested range to ensure free.
-      start_page_number = uint32_t(base_page_number);
-      end_page_number = uint32_t(base_page_number) + page_count - 1;
-      assert_true(end_page_number < page_table_.size());
-      bool any_taken = false;
-      for (uint32_t page_number = uint32_t(base_page_number);
-           !any_taken && page_number <= end_page_number; ++page_number) {
-        bool is_free = page_table_[page_number].state == 0;
-        if (!is_free) {
-          // At least one page in the range is used, skip to next.
-          // We know we'll be starting at least before this page.
-          any_taken = true;
-          if (page_count > page_number) {
-            // Not enough space left to fit entire page range. Breaks outer
-            // loop.
-            base_page_number = -1;
-          } else {
-            base_page_number = page_number - page_count;
-            base_page_number -= QuickMod(base_page_number, page_scan_stride);
-            base_page_number += page_scan_stride;  // cancel out loop logic
-          }
-          break;
-        }
-      }
-      if (!any_taken) {
-        // Found our place.
+    // Search free blocks from high addresses downward.
+    // Find the first block that could overlap our range.
+    auto it = free_blocks_.upper_bound(high_page_number);
+    while (it != free_blocks_.begin()) {
+      --it;
+      uint32_t block_start = it->first;
+      uint32_t block_count = it->second;
+      uint32_t block_end = block_start + block_count;
+
+      // Block is entirely below our search range — stop.
+      if (block_end <= low_page_number) {
         break;
       }
-      // Retry.
-      start_page_number = end_page_number = UINT_MAX;
+
+      // Skip blocks too small to possibly fit.
+      if (block_count < page_count) {
+        continue;
+      }
+
+      // Compute the highest aligned start within this block and range.
+      // high_page_number is exclusive and rounded down to the stride, so
+      // the top stride of pages is never returned.
+      uint32_t high_aligned =
+          high_page_number - QuickMod(high_page_number, page_scan_stride);
+      uint32_t usable_end = std::min(block_end, high_aligned);
+      if (usable_end < page_count) {
+        continue;
+      }
+      uint32_t latest_start = usable_end - page_count;
+      // Align down to stride.
+      latest_start -= QuickMod(latest_start, page_scan_stride);
+      uint32_t usable_start = std::max(block_start, low_page_number);
+      if (latest_start >= usable_start &&
+          latest_start + page_count <= block_end) {
+        start_page_number = latest_start;
+        end_page_number = latest_start + page_count - 1;
+        break;
+      }
     }
   } else {
-    for (uint32_t base_page_number = low_page_number;
-         base_page_number <= high_page_number - page_count;
-         base_page_number += page_scan_stride) {
-      if (page_table_[base_page_number].state != 0) {
-        // Base page not free, skip to next usable page.
-        continue;
+    // Search free blocks from low addresses upward.
+    auto it = free_blocks_.lower_bound(low_page_number);
+    // Check if the previous block extends into our range.
+    if (it != free_blocks_.begin()) {
+      auto prev = std::prev(it);
+      if (prev->first + prev->second > low_page_number) {
+        it = prev;
       }
-      // Check requested range to ensure free.
-      start_page_number = base_page_number;
-      end_page_number = base_page_number + page_count - 1;
-      bool any_taken = false;
-      for (uint32_t page_number = base_page_number;
-           !any_taken && page_number <= end_page_number; ++page_number) {
-        bool is_free = page_table_[page_number].state == 0;
-        if (!is_free) {
-          // At least one page in the range is used, skip to next.
-          // We know we'll be starting at least after this page.
-          any_taken = true;
-          base_page_number = xe::round_up(page_number + 1, page_scan_stride);
-          base_page_number -= page_scan_stride;  // cancel out loop logic
-          break;
-        }
-      }
-      if (!any_taken) {
-        // Found our place.
+    }
+    for (; it != free_blocks_.end(); ++it) {
+      uint32_t block_start = it->first;
+      uint32_t block_count = it->second;
+      uint32_t block_end = block_start + block_count;
+
+      // Block is entirely above our search range — stop.
+      if (block_start > high_page_number) {
         break;
       }
-      // Retry.
-      start_page_number = end_page_number = UINT_MAX;
+
+      // Skip blocks too small to possibly fit.
+      if (block_count < page_count) {
+        continue;
+      }
+
+      // Compute the lowest aligned start within this block and range.
+      // high_page_number is treated as exclusive — the page at
+      // high_page_number itself is never returned.
+      uint32_t earliest = std::max(block_start, low_page_number);
+      uint32_t aligned_start = xe::round_up(earliest, page_scan_stride, false);
+      if (aligned_start + page_count <= block_end &&
+          aligned_start + page_count <= high_page_number) {
+        start_page_number = aligned_start;
+        end_page_number = aligned_start + page_count - 1;
+        break;
+      }
     }
   }
+
   if (start_page_number == UINT_MAX || end_page_number == UINT_MAX) {
     // Out of memory.
     XELOGE("BaseHeap::Alloc failed to find contiguous range");
@@ -1145,23 +1286,33 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
     return false;
   }
 
+  // Update free block tracker.
+  RemoveFreeBlock(start_page_number, page_count);
+
   // Allocate from host.
   if (allocation_type == kMemoryAllocationReserve) {
     // Reserve is not needed, as we are mapped already.
   } else {
-    auto alloc_type = (allocation_type & kMemoryAllocationCommit)
-                          ? xe::memory::AllocationType::kCommit
-                          : xe::memory::AllocationType::kReserve;
-    void* result = xe::memory::AllocFixed(
-        TranslateRelative(start_page_number << page_size_shift_),
-        page_count << page_size_shift_, alloc_type, ToPageAccess(protect));
-    if (!result) {
-      XELOGE("BaseHeap::Alloc failed to alloc range from host");
-      return false;
-    }
+    if (!ShouldSkipHostCommit(*this)) {
+      auto alloc_type = (allocation_type & kMemoryAllocationCommit)
+                            ? xe::memory::AllocationType::kCommit
+                            : xe::memory::AllocationType::kReserve;
+      void* result = xe::memory::AllocFixed(
+          TranslateRelative(start_page_number << page_size_shift_),
+          page_count << page_size_shift_, alloc_type, ToPageAccess(protect));
+      if (!result) {
+        XELOGE("BaseHeap::Alloc failed to alloc range from host");
+        // Restore the free block since we failed.
+        InsertFreeBlock(start_page_number, page_count);
+        return false;
+      }
 
-    if (cvars::scribble_heap && (protect & kMemoryProtectWrite)) {
-      RandomizeMemory(result, page_count << page_size_shift_);
+      if (cvars::scribble_heap && (protect & kMemoryProtectWrite)) {
+        RandomizeMemory(result, page_count << page_size_shift_);
+      }
+    } else if (cvars::scribble_heap && (protect & kMemoryProtectWrite)) {
+      RandomizeMemory(TranslateRelative(start_page_number << page_size_shift_),
+                      page_count << page_size_shift_);
     }
   }
 
@@ -1286,6 +1437,9 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
     unreserved_page_count_++;
   }
 
+  // Insert freed block into tracker with coalescing.
+  InsertFreeBlock(base_page_number, base_page_entry.region_page_count);
+
   return true;
 }
 
@@ -1349,8 +1503,10 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
   // Attempt host change (hopefully won't fail).
   // We can only do this if our size matches system page granularity.
   uint32_t page_count = end_page_number - start_page_number + 1;
+  bool host_offset_aligned = (host_address_offset_ & page_size_mask) == 0;
   if (page_size_ == xe_page_size ||
-      ((((page_count << page_size_shift_) & page_size_mask) == 0) &&
+      (host_offset_aligned &&
+       (((page_count << page_size_shift_) & page_size_mask) == 0) &&
        (((start_page_number << page_size_shift_) & page_size_mask) == 0))) {
     memory::PageAccess old_protect_access;
     if (!xe::memory::Protect(
@@ -1365,8 +1521,69 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
       *old_protect = FromPageAccess(old_protect_access);
     }
   } else {
-    XELOGW("BaseHeap::Protect: ignoring request as not 4k page aligned");
-    return false;
+    // If the host page size is larger than the guest page size, align
+    // protection to host pages and use the most permissive access needed by
+    // any guest page in each host page to avoid over-restricting smaller guest
+    // pages within a host page.
+    if (page_size_ < xe_page_size) {
+      uint32_t start_offset =
+          host_address_offset_ + (start_page_number << page_size_shift_);
+      uint32_t end_offset = host_address_offset_ +
+                            ((end_page_number + 1) << page_size_shift_) - 1;
+
+      uint32_t aligned_start_offset = start_offset & ~page_size_mask;
+      uint32_t aligned_end_offset = (end_offset | page_size_mask) + 1;
+
+      for (uint32_t host_offset = aligned_start_offset;
+           host_offset < aligned_end_offset; host_offset += xe_page_size) {
+        uint32_t first_guest_page = 0;
+        if (host_offset > host_address_offset_) {
+          first_guest_page =
+              (host_offset - host_address_offset_) >> page_size_shift_;
+        }
+        uint32_t host_page_end = host_offset + xe_page_size - 1;
+        if (host_page_end < host_address_offset_) {
+          continue;
+        }
+        uint32_t last_guest_page =
+            (host_page_end - host_address_offset_) >> page_size_shift_;
+        if (last_guest_page >= page_table_.size()) {
+          last_guest_page = static_cast<uint32_t>(page_table_.size()) - 1;
+        }
+
+        xe::memory::PageAccess host_access = xe::memory::PageAccess::kNoAccess;
+        for (uint32_t p = first_guest_page; p <= last_guest_page; ++p) {
+          uint32_t page_prot = (p >= start_page_number && p <= end_page_number)
+                                   ? protect
+                                   : page_table_[p].current_protect;
+          xe::memory::PageAccess page_access = ToPageAccess(page_prot);
+          if (page_access == xe::memory::PageAccess::kReadWrite) {
+            host_access = xe::memory::PageAccess::kReadWrite;
+            break;
+          }
+          if (page_access == xe::memory::PageAccess::kReadOnly &&
+              host_access == xe::memory::PageAccess::kNoAccess) {
+            host_access = xe::memory::PageAccess::kReadOnly;
+          }
+        }
+
+        xe::memory::Protect(
+            reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(membase_) +
+                                    heap_base_ + host_offset),
+            xe_page_size, host_access, nullptr);
+      }
+
+      if (old_protect) {
+        *old_protect = page_table_[start_page_number].current_protect;
+      }
+    } else {
+      XELOGW(
+          "BaseHeap::Protect: unaligned to host page size; skipping mprotect");
+      if (old_protect) {
+        *old_protect = page_table_[start_page_number].current_protect;
+      }
+      return false;
+    }
   }
 
   // Perform table change.
@@ -1539,6 +1756,13 @@ void PhysicalHeap::Initialize(Memory* memory, uint8_t* membase,
   BaseHeap::Initialize(memory, membase, heap_type, heap_base, heap_size,
                        page_size, host_address_offset);
   parent_heap_ = parent_heap;
+
+  // The physical base offset (host_address_offset) must be a multiple of
+  // page_size. Otherwise, aligned parent allocations become misaligned after
+  // translation back to virtual addresses (parent_address + heap_base_ -
+  // GetPhysicalAddress(heap_base_) loses alignment).
+  xenia_assert(host_address_offset % page_size == 0);
+
   system_page_size_ = uint32_t(xe::memory::page_size());
   xenia_assert(xe::is_pow2(system_page_size_));
   system_page_shift_ = xe::log2_floor(system_page_size_);
@@ -1572,18 +1796,29 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
                                 alignment, allocation_type, protect, top_down,
                                 &parent_address)) {
     XELOGE(
-        "PhysicalHeap::Alloc unable to alloc physical memory in parent heap");
+        "PhysicalHeap::Alloc unable to alloc physical memory in parent heap "
+        "(requested {} bytes, parent free {}/{} pages)",
+        size, parent_heap_->unreserved_page_count(),
+        parent_heap_->total_page_count());
     return false;
   }
 
   // Given the address we've reserved in the parent heap, pin that here.
   // Shouldn't be possible for it to be allocated already.
-  uint32_t address = heap_base_ + parent_address - parent_heap_start;
+  const uint32_t address = heap_base_ + parent_address - parent_heap_start;
+  if ((address + host_address_offset_) % alignment != 0) {
+    XELOGE(
+        "PhysicalHeap::Alloc translated address {:08X} misaligned "
+        "(alignment {:08X}, physical base offset {:08X})",
+        address, alignment, parent_heap_start);
+    parent_heap_->Release(parent_address);
+    return false;
+  }
   if (!BaseHeap::AllocFixed(address, size, alignment, allocation_type,
                             protect)) {
     XELOGE(
         "PhysicalHeap::Alloc unable to pin physical memory in physical heap");
-    // TODO(benvanik): don't leak parent memory.
+    parent_heap_->Release(parent_address);
     return false;
   }
   *out_address = address;
@@ -1607,19 +1842,29 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size,
   if (!parent_heap_->AllocFixed(parent_base_address, size, alignment,
                                 allocation_type, protect)) {
     XELOGE(
-        "PhysicalHeap::Alloc unable to alloc physical memory in parent heap");
+        "PhysicalHeap::AllocFixed unable to alloc physical memory in parent "
+        "heap");
     return false;
   }
 
   // Given the address we've reserved in the parent heap, pin that here.
   // Shouldn't be possible for it to be allocated already.
-  uint32_t address =
+  const uint32_t address =
       heap_base_ + parent_base_address - GetPhysicalAddress(heap_base_);
+  if ((address + host_address_offset_) % alignment != 0) {
+    XELOGE(
+        "PhysicalHeap::AllocFixed translated address {:08X} misaligned "
+        "(alignment {:08X}, physical base offset {:08X})",
+        address, alignment, GetPhysicalAddress(heap_base_));
+    parent_heap_->Release(parent_base_address);
+    return false;
+  }
   if (!BaseHeap::AllocFixed(address, size, alignment, allocation_type,
                             protect)) {
     XELOGE(
-        "PhysicalHeap::Alloc unable to pin physical memory in physical heap");
-    // TODO(benvanik): don't leak parent memory.
+        "PhysicalHeap::AllocFixed unable to pin physical memory in physical "
+        "heap");
+    parent_heap_->Release(parent_base_address);
     return false;
   }
 
@@ -1648,19 +1893,30 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address,
                                 alignment, allocation_type, protect, top_down,
                                 &parent_address)) {
     XELOGE(
-        "PhysicalHeap::Alloc unable to alloc physical memory in parent heap");
+        "PhysicalHeap::AllocRange unable to alloc physical memory in parent "
+        "heap (requested {} bytes, parent free {}/{} pages)",
+        size, parent_heap_->unreserved_page_count(),
+        parent_heap_->total_page_count());
     return false;
   }
-
   // Given the address we've reserved in the parent heap, pin that here.
   // Shouldn't be possible for it to be allocated already.
-  uint32_t address =
+  const uint32_t address =
       heap_base_ + parent_address - GetPhysicalAddress(heap_base_);
+  if ((address + host_address_offset_) % alignment != 0) {
+    XELOGE(
+        "PhysicalHeap::AllocRange translated address {:08X} misaligned "
+        "(alignment {:08X}, physical base offset {:08X})",
+        address, alignment, GetPhysicalAddress(heap_base_));
+    parent_heap_->Release(parent_address);
+    return false;
+  }
   if (!BaseHeap::AllocFixed(address, size, alignment, allocation_type,
                             protect)) {
     XELOGE(
-        "PhysicalHeap::Alloc unable to pin physical memory in physical heap");
-    // TODO(benvanik): don't leak parent memory.
+        "PhysicalHeap::AllocRange unable to pin physical memory in physical "
+        "heap");
+    parent_heap_->Release(parent_address);
     return false;
   }
   *out_address = address;
@@ -1932,7 +2188,13 @@ bool PhysicalHeap::TriggerCallbacks(
     }
   }
   if (!any_watched) {
-    return false;
+    // No watches on this page — another thread already cleared them (race
+    // condition between the fault firing and acquiring the lock). Return true
+    // so the faulting instruction retries; the page is now unprotected and the
+    // access will succeed. This is the signal-safe equivalent of the
+    // QueryProtect check in the non-Linux path of
+    // MMIOHandler::ExceptionCallback.
+    return true;
   }
 
   // Trigger callbacks.

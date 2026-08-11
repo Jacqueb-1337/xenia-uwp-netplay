@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "xenia/kernel/xam/achievement_manager.h"
+#include "xenia/kernel/xam/content_manager.h"
 #include "xenia/kernel/xam/user_tracker.h"
 #include "xenia/kernel/xam/xam.h"
 #include "xenia/kernel/xobject.h"
@@ -201,30 +202,12 @@ class XTitleEnumerator : public XEnumerator {
   size_t current_item_ = 0;
 };
 
-class XUserStatsEnumerator : public XEnumerator {
- public:
-  struct XUSER_STATS_SPEC {
-    xe::be<uint32_t> ViewId;
-    xe::be<uint32_t> NumColumnIds;
-    xe::be<uint16_t> rgwColumnIds[0x40];
-  };
-
-  XUserStatsEnumerator(KernelState* kernel_state, size_t items_per_enumerate)
-      : XEnumerator(kernel_state, items_per_enumerate, 0) {}
-
-  uint32_t WriteItems(uint8_t* buffer_data, uint32_t buffer_size,
-                      uint32_t* written_count) override;
-
- private:
-  std::vector<XUSER_STATS_SPEC> items_;
-  size_t current_item_ = 0;
-};
-
 class XMPCreateUserPlaylistEnumerator : public XEnumerator {
  public:
   XMPCreateUserPlaylistEnumerator(KernelState* kernel_state,
                                   size_t items_per_enumerate)
-      : XEnumerator(kernel_state, items_per_enumerate, 0) {}
+      : XEnumerator(kernel_state, items_per_enumerate,
+                    sizeof(xam::XMP_USER_PLAYLIST_INFO)) {}
 
   size_t item_count() const { return items_.size(); }
 
@@ -240,6 +223,61 @@ class XMPCreateUserPlaylistEnumerator : public XEnumerator {
   size_t current_item_ = 0;
 };
 
+class ProfileEnumerator : public XEnumerator {
+ public:
+  ProfileEnumerator(KernelState* kernel_state, size_t items_per_enumerate)
+      : XEnumerator(kernel_state, items_per_enumerate,
+                    sizeof(xam::X_PROFILEENUMRESULT)) {}
+
+  size_t item_count() const { return items_.size(); }
+
+  void AppendItem(const xam::X_PROFILEENUMRESULT& item) {
+    items_.push_back(item);
+  }
+
+  uint32_t WriteItems(uint8_t* buffer_data, uint32_t buffer_size,
+                      uint32_t* written_count) override;
+
+ private:
+  std::vector<xam::X_PROFILEENUMRESULT> items_;
+  size_t current_item_ = 0;
+};
+
+class ContentEnumerator : public XEnumerator {
+ public:
+  ContentEnumerator(KernelState* kernel_state, size_t items_per_enumerate)
+      : XEnumerator(kernel_state, items_per_enumerate,
+                    sizeof(xam::XCONTENT_DATA)) {}
+
+  size_t item_count() const { return items_.size(); }
+
+  void AppendItem(const xam::XCONTENT_DATA& item) { items_.push_back(item); }
+
+  uint32_t WriteItems(uint8_t* buffer_data, uint32_t buffer_size,
+                      uint32_t* written_count) override;
+
+ private:
+  std::vector<xam::XCONTENT_DATA> items_;
+  size_t current_item_ = 0;
+};
+
+class FriendsEnumerator : public XEnumerator {
+ public:
+  FriendsEnumerator(KernelState* kernel_state, size_t items_per_enumerate)
+      : XEnumerator(kernel_state, items_per_enumerate,
+                    sizeof(X_ONLINE_FRIEND)) {}
+
+  size_t item_count() const { return items_.size(); }
+
+  void AppendItem(const X_ONLINE_FRIEND& item) { items_.push_back(item); }
+
+  uint32_t WriteItems(uint8_t* buffer_data, uint32_t buffer_size,
+                      uint32_t* written_count) override;
+
+ private:
+  std::vector<X_ONLINE_FRIEND> items_;
+  size_t current_item_ = 0;
+};
 }  // namespace kernel
 }  // namespace xe
 

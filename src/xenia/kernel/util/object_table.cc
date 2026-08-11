@@ -25,16 +25,21 @@ ObjectTable::~ObjectTable() { Reset(); }
 void ObjectTable::Reset() {
   auto global_lock = global_critical_region_.Acquire();
 
-  // Release all objects.
+  // Release all objects, clearing their handles first so destructors
+  // don't assert on non-empty handles_.
   for (uint32_t n = 0; n < table_capacity_; n++) {
     ObjectTableEntry& entry = table_[n];
     if (entry.object) {
+      entry.object->handles().clear();
+      entry.handle_ref_count = 0;
       entry.object->Release();
     }
   }
   for (uint32_t n = 0; n < host_table_capacity_; n++) {
     ObjectTableEntry& entry = host_table_[n];
     if (entry.object) {
+      entry.object->handles().clear();
+      entry.handle_ref_count = 0;
       entry.object->Release();
     }
   }
@@ -141,7 +146,7 @@ X_STATUS ObjectTable::AddHandle(XObject* object, X_HANDLE* out_handle) {
       // Retain so long as the object is in the table.
       object->Retain();
 
-      XELOGI("Added handle:{:08X} for {}", handle, typeid(*object).name());
+      XELOGD("Added handle:{:08X} for {}", handle, typeid(*object).name());
     }
   }
 
@@ -228,7 +233,7 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
       object->handles().erase(handle_entry);
     }
 
-    XELOGI("Removed handle:{:08X} for {}", handle, typeid(*object).name());
+    XELOGD("Removed handle:{:08X} for {}", handle, typeid(*object).name());
 
     // Remove object name from mapping to prevent naming collision.
     if (!object->name().empty()) {
@@ -271,7 +276,7 @@ void ObjectTable::PurgeAllObjects() {
     auto& entry = table_[slot];
     if (entry.object) {
       entry.handle_ref_count = 0;
-      entry.object->Release();
+      entry.object->ReleaseHandle();
 
       entry.object = nullptr;
     }
