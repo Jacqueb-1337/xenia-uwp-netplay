@@ -36,6 +36,7 @@ includedirs({
   ".",
   "src",
   "third_party",
+  "build",
 })
 
 defines({

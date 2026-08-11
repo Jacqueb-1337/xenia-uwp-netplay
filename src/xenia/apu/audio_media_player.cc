@@ -8,6 +8,8 @@
  */
 
 #include "xenia/apu/audio_media_player.h"
+
+#include "xenia/apu/ffmpeg_compat.h"
 #include "xenia/apu/audio_driver.h"
 #include "xenia/apu/audio_system.h"
 #include "xenia/apu/xma_context.h"
@@ -130,7 +132,7 @@ ProcessAudioResult ProcessAudioLoop(AudioMediaPlayer* player,
           break;
         }
 
-        ConvertAudioFrame(frame, avctx->ch_layout.nb_channels, &frameBuffer);
+        ConvertAudioFrame(frame, GetAvChannelCount(avctx), &frameBuffer);
         player->ProcessAudioBuffer(&frameBuffer);
       }
     }
@@ -230,7 +232,7 @@ void AudioMediaPlayer::Play() {
   InitializeAndOpenAvCodec(song_buffer, formatContext, codecContext);
 
   if (!SetupDriver(codecContext->sample_rate,
-                   codecContext->ch_layout.nb_channels)) {
+                   GetAvChannelCount(codecContext))) {
     XELOGE("Driver initialization failed!");
     avcodec_free_context(&codecContext);
     av_freep(&formatContext->pb->buffer);

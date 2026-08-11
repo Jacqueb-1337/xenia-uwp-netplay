@@ -8,6 +8,8 @@
 */
 
 #include "xenia/apu/xma_context_new.h"
+
+#include "xenia/apu/ffmpeg_compat.h"
 #include "xenia/apu/xma_helpers.h"
 
 #include "xenia/base/logging.h"
@@ -68,7 +70,7 @@ int XmaContextNew::Setup(uint32_t id, Memory* memory, uint32_t guest_ptr) {
   }
 
   // Initialize these to 0. They'll actually be set later.
-  av_context_->ch_layout = AVChannelLayout{};
+  ResetAvChannelLayout(av_context_);
   av_context_->sample_rate = 0;
 
   av_frame_ = av_frame_alloc();
@@ -896,17 +898,17 @@ int XmaContextNew::PrepareDecoder(int sample_rate, bool is_two_channel) {
   // Re-initialize the context with new sample rate and channels.
   uint32_t channels = is_two_channel ? 2 : 1;
   if (av_context_->sample_rate != sample_rate ||
-      av_context_->ch_layout.nb_channels != (int)channels) {
+      GetAvChannelCount(av_context_) != (int)channels) {
     XELOGAPU("XmaContext {}: Codec reinit: rate {} -> {}, channels {} -> {}",
              id(), av_context_->sample_rate, sample_rate,
-             av_context_->ch_layout.nb_channels, channels);
+             GetAvChannelCount(av_context_), channels);
     // We have to recreate the codec context so it'll realloc whatever data it
     // needs.
     avcodec_free_context(&av_context_);
     av_context_ = avcodec_alloc_context3(av_codec_);
 
     av_context_->sample_rate = sample_rate;
-    av_channel_layout_default(&av_context_->ch_layout, channels);
+    SetAvChannelLayout(av_context_, channels);
     av_context_->flags2 |= AV_CODEC_FLAG2_SKIP_MANUAL;
 
     if (avcodec_open2(av_context_, av_codec_, NULL) < 0) {

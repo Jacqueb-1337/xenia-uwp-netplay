@@ -23,6 +23,7 @@
 #include "xenia/kernel/xam/xdbf/gpd_info_profile.h"
 #include "xenia/kernel/xam/xdbf/gpd_info_title.h"
 #include "xenia/kernel/xnet.h"
+#include "xenia/kernel/xsession.h"
 #include "xenia/xbox.h"
 
 DECLARE_int32(network_mode);
@@ -33,8 +34,8 @@ namespace xam {
 
 enum class X_USER_SIGNIN_STATE : uint32_t {
   NotSignedIn,
-  SignedInLocally,
-  SignedInToLive
+  SignedInLocally,  // Offline
+  SignedInToLive,   // Online
 };
 
 enum class X_USER_PROFILE_SETTING_SOURCE : uint32_t {
@@ -89,8 +90,13 @@ enum class XTileType {
 inline const std::map<XTileType, std::string> kTileFileNames = {
     {XTileType::kGamerTile, "tile_64.png"},
     {XTileType::kGamerTileSmall, "tile_32.png"},
-    {XTileType::kPersonalGamerTile, "tile_64.png"},
-    {XTileType::kPersonalGamerTileSmall, "tile_32.png"},
+    {XTileType::kLocalGamerTile, "tile_64.png"},
+    {XTileType::kLocalGamerTileSmall, "tile_32.png"},
+    {XTileType::kAwardedGamerTile, "64_{:08x}{:08x}{:08x}.png"},
+    {XTileType::kAwardedGamerTileSmall, "32_{:08x}{:08x}{:08x}.png"},
+    {XTileType::kGamerTileByImageId, "{:d}_{:08x}{:08x}{:08x}.png"},
+    {XTileType::kPersonalGamerTile, "pp_64.png"},
+    {XTileType::kPersonalGamerTileSmall, "pp_32.png"},
     {XTileType::kAvatarGamerTile, "avtr_64.png"},
     {XTileType::kAvatarGamerTileSmall, "avtr_32.png"},
 };
@@ -102,29 +108,24 @@ class UserProfile {
  public:
   UserProfile(const uint64_t xuid, const X_XAMACCOUNTINFO* account_info);
 
+  void LoadFriends();
+
+  bool IsSignedInToLive() const;
+
   uint64_t xuid() const { return xuid_; }
   uint64_t GetOnlineXUID() const {
-    if (!IsLiveEnabled()) {
-      return 0;
-    }
-    const uint64_t online_xuid =
-        static_cast<uint64_t>(account_info_.xuid_online);
-    return online_xuid ? online_xuid : xuid_;
+    return IsLiveEnabled() ? static_cast<uint64_t>(account_info_.xuid_online)
+                           : 0;
   }
   uint64_t GetLogonXUID() const {
     return IsLiveEnabled() &&
                    signin_state() == X_USER_SIGNIN_STATE::SignedInToLive
-               ? GetOnlineXUID()
+               ? static_cast<uint64_t>(account_info_.xuid_online)
                : xuid();
   }
 
   std::string name() const { return account_info_.GetGamertagString(); }
-  X_USER_SIGNIN_STATE signin_state() const {
-    return IsLiveEnabled() && cvars::network_mode == NETWORK_MODE::XBOXLIVE
-               ? X_USER_SIGNIN_STATE::SignedInToLive
-               : X_USER_SIGNIN_STATE::SignedInLocally;
-  }
-  uint32_t type() const { return 1 | 2; }
+  X_USER_SIGNIN_STATE signin_state() const;
 
   uint32_t GetReservedFlags() const {
     return account_info_.GetReservedFlags();
@@ -143,15 +144,14 @@ class UserProfile {
   bool IsParentalControlled() const {
     return account_info_.IsParentalControlled();
   };
-  bool IsLiveEnabled() const {
-    return account_info_.IsLiveEnabled() ||
-           cvars::network_mode == NETWORK_MODE::XBOXLIVE;
-  }
+  bool IsLiveEnabled() const { return account_info_.IsLiveEnabled(); }
 
   std::span<const uint8_t> GetProfileIcon(XTileType icon_type) {
     // Overwrite same types?
     if (icon_type == XTileType::kPersonalGamerTile ||
-        icon_type == XTileType::kLocalGamerTile) {
+        icon_type == XTileType::kLocalGamerTile ||
+        icon_type == XTileType::kGamerTileByImageId ||
+        icon_type == XTileType::kGamerTileByKey) {
       icon_type = XTileType::kGamerTile;
     }
 
@@ -175,63 +175,86 @@ class UserProfile {
 
   friend class UserTracker;
   friend class GpdAchievementBackend;
+  friend class FriendsManager;
+  friend class PresenceManager;
+  friend class MuteListManager;
 
-  static X_ONLINE_FRIEND GenerateDummyFriend();
-
-  void AddDummyFriends(const uint32_t friends_count);
-
-  bool GetFriendPresenceFromXUID(const uint64_t xuid,
-                                 X_ONLINE_PRESENCE* presence);
-
-  bool SetFriend(const X_ONLINE_FRIEND& update_peer);
-  bool AddFriendFromXUID(const uint64_t xuid);
-  bool AddFriend(X_ONLINE_FRIEND* add_friend);
-  bool RemoveFriend(const X_ONLINE_FRIEND& peer);
-  bool RemoveFriend(const uint64_t xuid);
-  void RemoveAllFriends();
-
-  bool GetFriendFromIndex(const uint32_t index, X_ONLINE_FRIEND* peer);
-  bool GetFriendFromXUID(const uint64_t xuid, X_ONLINE_FRIEND* peer);
-  bool IsFriend(const uint64_t xuid, X_ONLINE_FRIEND* peer = nullptr);
-
-  const std::vector<X_ONLINE_FRIEND> GetFriends() const { return friends_; }
-  const std::vector<uint64_t> GetFriendsXUIDs() const;
-
-  const uint32_t GetFriendsCount() const;
-
-  bool SetSubscriptionFromXUID(const uint64_t xuid, X_ONLINE_PRESENCE* peer);
-  bool GetSubscriptionFromXUID(const uint64_t xuid, X_ONLINE_PRESENCE* peer);
-  bool SubscribeFromXUID(const uint64_t xuid);
-  bool UnsubscribeFromXUID(const uint64_t xuid);
-  bool IsSubscribed(const uint64_t xuid);
-
-  void SetSelfInvite(X_INVITE_INFO* invite_info);
-  X_INVITE_INFO* GetSelfInvite() { return &self_invite; };
-
-  const std::vector<uint64_t> GetSubscribedXUIDs() const;
-
-  bool MutePlayer(uint64_t xuid);
-  bool UnmutePlayer(uint64_t xuid);
-  bool IsPlayerMuted(uint64_t xuid) const;
+  void SetSelfInvite(X_INVITE_INFO invite_info);
+  X_INVITE_INFO GetSelfInvite() { return self_invite; };
 
   std::u16string GetPresenceString() const;
-  bool UpdatePresence();
-  bool BuildPresenceString();
+
+  std::optional<object_ref<XSession>> FindValidInviteSession();
+  void SetDiscordInviteSessionDetails(
+      const XSESSION_LOCAL_DETAILS& session_details);
+
+  XSESSION_LOCAL_DETAILS GetDiscordInviteSessionDetails() const;
+
+  void AddOwnedSession(object_ref<XSession> owned_session) {
+    const auto& session_obj_ref =
+        std::find_if(owned_sessions_.cbegin(), owned_sessions_.cend(),
+                     [owned_session](object_ref<XSession> object) {
+                       return object->handle() == owned_session->handle();
+                     });
+
+    if (session_obj_ref != owned_sessions_.cend()) {
+      return;
+    }
+
+    owned_session->RetainHandle();
+    owned_sessions_.push_back(owned_session);
+  };
+
+  void RemoveOwnedSession(object_ref<XSession> owned_session) {
+    const bool erased = std::erase_if(
+        owned_sessions_, [owned_session](object_ref<XSession> object) {
+          return object->handle() == owned_session->handle();
+        });
+
+    if (erased) {
+      owned_session->ReleaseHandle();
+    }
+  };
+
+  std::vector<object_ref<XSession>> GetOwnedSessions() {
+    return owned_sessions_;
+  };
+
+  xe::threading::PeriodicCallback* GetPeriodicMaintenanceTask() const {
+    return periodic_maintenance_task_.get();
+  };
+
+  void SetPeriodicMaintenanceTask(
+      std::unique_ptr<xe::threading::PeriodicCallback> task) {
+    periodic_maintenance_task_ = std::move(task);
+  };
 
  private:
   uint64_t xuid_;
   X_XAMACCOUNTINFO account_info_;
-  X_INVITE_INFO self_invite;
+
+  X_INVITE_INFO self_invite = {};
+  std::vector<object_ref<XSession>> owned_sessions_;
+  std::unique_ptr<xe::threading::PeriodicCallback> periodic_maintenance_task_;
 
   GpdInfoProfile dashboard_gpd_;
   std::map<uint32_t, GpdInfoTitle> games_gpd_;
   std::vector<Property> properties_;  // Includes contexts!
+
   std::vector<X_ONLINE_FRIEND> friends_;
+  std::mutex friends_mutex_;
+  std::set<uint64_t> dummy_friend_xuids_;
+
   std::map<uint64_t, X_ONLINE_PRESENCE> subscriptions_;
-  std::vector<uint64_t> muted_players_;
+  std::mutex subscriptions_mutex_;
+
+  std::set<uint64_t> mute_list_;  // XONLINE_MUTELIST_INTERNAL
+  std::mutex mute_list_mutex_;
 
   std::map<XTileType, std::vector<uint8_t>> profile_images_;
   std::u16string online_presence_desc_ = u"";
+
+  XSESSION_LOCAL_DETAILS discord_invite_session_details_ = {};
 
   GpdInfo* GetGpd(const uint32_t title_id);
   const GpdInfo* GetGpd(const uint32_t title_id) const;

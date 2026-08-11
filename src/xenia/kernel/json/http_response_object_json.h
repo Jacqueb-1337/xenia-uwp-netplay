@@ -10,6 +10,8 @@
 #ifndef XENIA_KERNEL_HTTP_RESPONSE_OBJECT_JSON_H_
 #define XENIA_KERNEL_HTTP_RESPONSE_OBJECT_JSON_H_
 
+#include <memory>
+
 #include "xenia/kernel/json/base_object_json.h"
 #include "xenia/kernel/util/net_utils.h"
 
