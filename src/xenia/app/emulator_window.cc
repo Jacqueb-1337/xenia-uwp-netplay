@@ -7843,7 +7843,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           ImGui::Indent(about_content_offset_x);
 
           ImGui::TextWrapped(
-              "Xenia Canary UWP NXE 1.1.8.2\n"
+              "Xenia Canary UWP NXE 1.1.8.4\n"
               "A Unofficial fork of Xenia focusing on Xbox support and a blades "
               "style frontend.\n");
 

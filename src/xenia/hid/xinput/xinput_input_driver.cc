@@ -163,12 +163,19 @@ X_RESULT XInputInputDriver::GetState(uint32_t user_index,
     unsigned int dwPaddingReserved;
   } native_state;
 
-  // If the guide button is enabled use XInputGetStateEx, otherwise use the
-  // default XInputGetState.
-  auto xigs = cvars::guide_button ? (decltype(&XInputGetState))XInputGetStateEx_
-                                  : (decltype(&XInputGetState))XInputGetState_;
-
-  DWORD result = xigs(user_index, &native_state.state);
+  // Prefer XInputGetStateEx when Guide support is requested, but Xbox UWP's
+  // xinput1_4.dll may resolve ordinal 100 while calls to it still return
+  // ERROR_PROC_NOT_FOUND. Fall back to the public XInputGetState API in that
+  // case. On WinRT the Start + View/Back combo below synthesizes Guide anyway.
+  auto xigs = (decltype(&XInputGetState))XInputGetState_;
+  DWORD result = ERROR_PROC_NOT_FOUND;
+  if (cvars::guide_button && XInputGetStateEx_) {
+    auto xigs_ex = (decltype(&XInputGetState))XInputGetStateEx_;
+    result = xigs_ex(user_index, &native_state.state);
+  }
+  if (result == ERROR_PROC_NOT_FOUND) {
+    result = xigs(user_index, &native_state.state);
+  }
   if (result) {
     if (result == ERROR_DEVICE_NOT_CONNECTED) {
       set_skip(user_index);

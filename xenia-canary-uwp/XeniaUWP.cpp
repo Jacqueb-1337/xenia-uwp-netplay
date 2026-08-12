@@ -302,9 +302,17 @@ void UWP::UpdateImGuiIO() {
   uint32_t selected_user = 0xFFFFFFFFu;
   uint32_t fallback_user = 0xFFFFFFFFu;
   constexpr int16_t kActivityStickDeadzone = 6000;
+  static std::array<uint32_t, 4> last_get_state_status = {
+      0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
   for (uint32_t user_index = 0; user_index < 4; ++user_index) {
     hid::X_INPUT_STATE candidate = {};
-    if (driver->GetState(user_index, &candidate) != X_STATUS_SUCCESS) {
+    const uint32_t get_state_status = driver->GetState(user_index, &candidate);
+    if (get_state_status != last_get_state_status[user_index]) {
+      XELOGI("[UWP] Frontend XInput user {} GetState status 0x{:08X}",
+             user_index, get_state_status);
+      last_get_state_status[user_index] = get_state_status;
+    }
+    if (get_state_status != X_STATUS_SUCCESS) {
       continue;
     }
     if (!have_fallback) {
