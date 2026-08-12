@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 
 #include "windowed_app_context_uwp.h"
@@ -44,6 +45,7 @@ static Emulator* s_emulator;
 static std::vector<std::string> s_paths;
 static std::vector<std::tuple<std::string, std::string>> s_games;
 static std::vector<std::string> s_scanned_paths;
+static bool s_modal_navigation_capture = false;
 
 namespace {
 constexpr uint64_t kAnalogNavInitialDelayMs = 275;
@@ -70,6 +72,26 @@ bool HasScannedDirectory(const std::string& normalized_path) {
                    normalized_path) != s_scanned_paths.cend();
 }
 
+bool IsConfiguredStorageRoot(const std::filesystem::path& path) {
+  const std::string normalized_path = NormalizeScannedPath(path);
+  for (const char* var_name : {"content_root", "cache_root", "storage_root"}) {
+    auto it = cvar::ConfigVars->find(var_name);
+    if (it == cvar::ConfigVars->end()) {
+      continue;
+    }
+    auto* configured_path =
+        dynamic_cast<cvar::ConfigVar<std::filesystem::path>*>(it->second);
+    if (!configured_path) {
+      continue;
+    }
+    const auto root = configured_path->GetTypedConfigValue();
+    if (!root.empty() && NormalizeScannedPath(root) == normalized_path) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool AddGameEntry(const std::filesystem::path& path, const std::string& name) {
   const std::string normalized_path = NormalizeScannedPath(path);
   auto existing = std::find_if(
@@ -81,26 +103,29 @@ bool AddGameEntry(const std::filesystem::path& path, const std::string& name) {
   }
 
   s_games.push_back({path.string(), name});
+  XELOGI("[UWP] Game library entry: {} -> {}", path.string(), name);
   return true;
 }
 
-enum class AnalogNavDirection { kLeft = 0, kRight, kUp, kDown };
+enum class NavDirection { kLeft = 0, kRight, kUp, kDown };
 
-struct AnalogNavRepeatState {
+struct NavRepeatState {
   bool active = false;
   bool repeating = false;
   uint64_t start_time_ms = 0;
   uint64_t last_emit_time_ms = 0;
 };
 
-std::array<AnalogNavRepeatState, 4> g_analog_nav_repeat_states;
+std::array<NavRepeatState, 4> g_nav_repeat_states;
+uint16_t g_previous_ui_buttons = 0;
+bool g_previous_ui_lt = false;
+bool g_previous_ui_rt = false;
 
-bool UpdateAnalogNavRepeatState(AnalogNavDirection direction,
-                                bool analog_active,
-                                uint64_t now_ms) {
-  auto& state = g_analog_nav_repeat_states[static_cast<size_t>(direction)];
+bool UpdateNavRepeatState(NavDirection direction, bool active,
+                          uint64_t now_ms) {
+  auto& state = g_nav_repeat_states[static_cast<size_t>(direction)];
 
-  if (!analog_active) {
+  if (!active) {
     state = {};
     return false;
   }
@@ -129,13 +154,26 @@ bool UpdateAnalogNavRepeatState(AnalogNavDirection direction,
   return false;
 }
 
-void ResetAnalogNavRepeatStates() {
-  for (auto& state : g_analog_nav_repeat_states) {
+void ResetFrontendInputStates() {
+  for (auto& state : g_nav_repeat_states) {
     state = {};
   }
+  g_previous_ui_buttons = 0;
+  g_previous_ui_lt = false;
+  g_previous_ui_rt = false;
 }
 
 }  // namespace
+
+void UWP::SetModalNavigationCapture(bool capture) {
+  if (s_modal_navigation_capture == capture) {
+    return;
+  }
+  s_modal_navigation_capture = capture;
+  XELOGI("UWP modal navigation capture: {}", capture ? "on" : "off");
+}
+
+bool UWP::IsModalNavigationCaptured() { return s_modal_navigation_capture; }
 
 void UWP::StartXenia() {
   app_context = std::make_unique<ui::UWPWindowedAppContext>();
@@ -163,6 +201,12 @@ void UWP::ExecutePendingFunctionsFromUIThread() {
 void UWP::RegisterXeniaWindow(xe::ui::Window* window) { s_window = window; }
 
 void UWP::UpdateImGuiIO() {
+  static bool logged_input_entry = false;
+  if (!logged_input_entry) {
+    XELOGI("[UWP] Frontend input pump reached");
+    logged_input_entry = true;
+  }
+
   ImGuiIO& io = ImGui::GetIO();
   io.AddKeyEvent(ImGuiKey_Backspace, false);
   io.AddKeyEvent(ImGuiKey_Enter, false);
@@ -181,77 +225,142 @@ void UWP::UpdateImGuiIO() {
     UWP::g_char_buffer.clear();
   }
 
+  // Called from ImGuiDrawer::Draw after the UWP frontend ImGui context is
+  // active. This is the sole controller-to-ImGui path on WinRT.
   auto driver = static_cast<xe::ui::UWPWindow*>(s_window)->xinputdriver();
   if (!driver) {
-    ResetAnalogNavRepeatStates();
+    static bool logged_missing_driver = false;
+    if (!logged_missing_driver) {
+      XELOGW("[UWP] Frontend input pump has no XInput driver");
+      logged_missing_driver = true;
+    }
+    io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
     return;
   }
 
-  hid::X_INPUT_STATE state;
-  if (driver->GetState(0, &state) != X_STATUS_SUCCESS) {
-    ResetAnalogNavRepeatStates();
+  // Xbox may assign the active controller to any XInput user slot. Prefer a
+  // controller that currently has activity, otherwise use the first connected
+  // one so release events continue to reach ImGui.
+  hid::X_INPUT_STATE state = {};
+  hid::X_INPUT_STATE fallback_state = {};
+  bool have_state = false;
+  bool have_fallback = false;
+  uint32_t selected_user = 0xFFFFFFFFu;
+  uint32_t fallback_user = 0xFFFFFFFFu;
+  constexpr int16_t kActivityStickDeadzone = 6000;
+  for (uint32_t user_index = 0; user_index < 4; ++user_index) {
+    hid::X_INPUT_STATE candidate = {};
+    if (driver->GetState(user_index, &candidate) != X_STATUS_SUCCESS) {
+      continue;
+    }
+    if (!have_fallback) {
+      fallback_state = candidate;
+      fallback_user = user_index;
+      have_fallback = true;
+    }
+    const auto& pad = candidate.gamepad;
+    const bool active =
+        pad.buttons != 0 || pad.left_trigger > 30 || pad.right_trigger > 30 ||
+        std::abs(pad.thumb_lx) > kActivityStickDeadzone ||
+        std::abs(pad.thumb_ly) > kActivityStickDeadzone ||
+        std::abs(pad.thumb_rx) > kActivityStickDeadzone ||
+        std::abs(pad.thumb_ry) > kActivityStickDeadzone;
+    if (active) {
+      state = candidate;
+      selected_user = user_index;
+      have_state = true;
+      break;
+    }
+  }
+  if (!have_state && have_fallback) {
+    state = fallback_state;
+    selected_user = fallback_user;
+    have_state = true;
+  }
+  if (!have_state) {
+    io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
     return;
   }
 
-  const uint16_t buttons = state.gamepad.buttons;
+  io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+  static uint32_t last_logged_user = 0xFFFFFFFFu;
+  if (selected_user != last_logged_user) {
+    XELOGI("[UWP] Frontend controller using XInput user {}", selected_user);
+    last_logged_user = selected_user;
+  }
 
-  io.AddKeyEvent(ImGuiKey_GamepadFaceDown,   (buttons & X_INPUT_GAMEPAD_A) != 0);
-  io.AddKeyEvent(ImGuiKey_GamepadFaceRight,  (buttons & X_INPUT_GAMEPAD_B) != 0);
-  io.AddKeyEvent(ImGuiKey_GamepadFaceLeft,   false);
-  io.AddKeyEvent(ImGuiKey_F12,               (buttons & X_INPUT_GAMEPAD_X) != 0);
-  io.AddKeyEvent(ImGuiKey_GamepadFaceUp,     (buttons & X_INPUT_GAMEPAD_Y) != 0);
-  io.AddKeyEvent(ImGuiKey_GamepadStart,      (buttons & X_INPUT_GAMEPAD_START) != 0);
+  const auto& gamepad = state.gamepad;
+  const uint16_t buttons = gamepad.buttons;
+  if (buttons) {
+    static uint16_t last_logged_buttons = 0;
+    if (buttons != last_logged_buttons) {
+      XELOGI("[UWP] Frontend controller buttons: 0x{:04X}", buttons);
+      last_logged_buttons = buttons;
+    }
+  }
 
-  io.AddKeyEvent(ImGuiKey_GamepadBack,       (buttons & X_INPUT_GAMEPAD_BACK) != 0);
-  io.AddKeyEvent(ImGuiKey_GamepadL1,         (buttons & X_INPUT_GAMEPAD_LEFT_SHOULDER) != 0);
-  io.AddKeyEvent(ImGuiKey_GamepadR1,         (buttons & X_INPUT_GAMEPAD_RIGHT_SHOULDER) != 0);
-  io.AddKeyEvent(ImGuiKey_GamepadL3,         (buttons & X_INPUT_GAMEPAD_LEFT_THUMB) != 0);
-  io.AddKeyEvent(ImGuiKey_GamepadR3,         (buttons & X_INPUT_GAMEPAD_RIGHT_THUMB) != 0);
+  // Feed normal held state into ImGui. With the old RequestPaintImpl call
+  // removed there is now only one gamepad event source, so ImGui can perform
+  // its own de-duplication/repeat handling correctly.
+  io.AddKeyEvent(ImGuiKey_GamepadFaceDown,
+                 (buttons & X_INPUT_GAMEPAD_A) != 0);
+  io.AddKeyEvent(ImGuiKey_GamepadFaceRight,
+                 (buttons & X_INPUT_GAMEPAD_B) != 0);
+  io.AddKeyEvent(ImGuiKey_GamepadFaceLeft, false);
+  io.AddKeyEvent(ImGuiKey_F12, (buttons & X_INPUT_GAMEPAD_X) != 0);
+  io.AddKeyEvent(ImGuiKey_GamepadFaceUp,
+                 (buttons & X_INPUT_GAMEPAD_Y) != 0);
+  io.AddKeyEvent(ImGuiKey_GamepadStart,
+                 (buttons & X_INPUT_GAMEPAD_START) != 0);
+  io.AddKeyEvent(ImGuiKey_GamepadBack,
+                 (buttons & X_INPUT_GAMEPAD_BACK) != 0);
+  io.AddKeyEvent(ImGuiKey_GamepadL1,
+                 !s_modal_navigation_capture &&
+                     (buttons & X_INPUT_GAMEPAD_LEFT_SHOULDER) != 0);
+  io.AddKeyEvent(ImGuiKey_GamepadR1,
+                 !s_modal_navigation_capture &&
+                     (buttons & X_INPUT_GAMEPAD_RIGHT_SHOULDER) != 0);
+  io.AddKeyEvent(ImGuiKey_GamepadL3,
+                 (buttons & X_INPUT_GAMEPAD_LEFT_THUMB) != 0);
+  io.AddKeyEvent(ImGuiKey_GamepadR3,
+                 (buttons & X_INPUT_GAMEPAD_RIGHT_THUMB) != 0);
 
   const int16_t kStickNavDeadzone = X_INPUT_GAMEPAD_LEFT_THUMB_DEADZONE;
-  const bool ls_left  = state.gamepad.thumb_lx <= -kStickNavDeadzone;
-  const bool ls_right = state.gamepad.thumb_lx >=  kStickNavDeadzone;
-  const bool ls_up    = state.gamepad.thumb_ly >=  kStickNavDeadzone;
-  const bool ls_down  = state.gamepad.thumb_ly <= -kStickNavDeadzone;
-  const uint64_t now_ms = Clock::QueryHostUptimeMillis();
+  const bool nav_left = gamepad.thumb_lx <= -kStickNavDeadzone ||
+                        (buttons & X_INPUT_GAMEPAD_DPAD_LEFT) != 0;
+  const bool nav_right = gamepad.thumb_lx >= kStickNavDeadzone ||
+                         (buttons & X_INPUT_GAMEPAD_DPAD_RIGHT) != 0;
+  const bool nav_up = gamepad.thumb_ly >= kStickNavDeadzone ||
+                      (buttons & X_INPUT_GAMEPAD_DPAD_UP) != 0;
+  const bool nav_down = gamepad.thumb_ly <= -kStickNavDeadzone ||
+                        (buttons & X_INPUT_GAMEPAD_DPAD_DOWN) != 0;
+  io.AddKeyEvent(ImGuiKey_GamepadDpadLeft, nav_left);
+  io.AddKeyEvent(ImGuiKey_GamepadDpadRight, nav_right);
+  io.AddKeyEvent(ImGuiKey_GamepadDpadUp, nav_up);
+  io.AddKeyEvent(ImGuiKey_GamepadDpadDown, nav_down);
 
-  const bool analog_nav_left =
-      UpdateAnalogNavRepeatState(AnalogNavDirection::kLeft, ls_left, now_ms);
-  const bool analog_nav_right =
-      UpdateAnalogNavRepeatState(AnalogNavDirection::kRight, ls_right, now_ms);
-  const bool analog_nav_up =
-      UpdateAnalogNavRepeatState(AnalogNavDirection::kUp, ls_up, now_ms);
-  const bool analog_nav_down =
-      UpdateAnalogNavRepeatState(AnalogNavDirection::kDown, ls_down, now_ms);
-
-  io.AddKeyEvent(ImGuiKey_GamepadDpadLeft,
-                 ((buttons & X_INPUT_GAMEPAD_DPAD_LEFT) != 0) ||
-                     analog_nav_left);
-  io.AddKeyEvent(ImGuiKey_GamepadDpadRight,
-                 ((buttons & X_INPUT_GAMEPAD_DPAD_RIGHT) != 0) ||
-                     analog_nav_right);
-  io.AddKeyEvent(ImGuiKey_GamepadDpadUp,
-                 ((buttons & X_INPUT_GAMEPAD_DPAD_UP) != 0) || analog_nav_up);
-  io.AddKeyEvent(ImGuiKey_GamepadDpadDown,
-                 ((buttons & X_INPUT_GAMEPAD_DPAD_DOWN) != 0) ||
-                     analog_nav_down);
-
-  // Right stick still exposed for camera/mouse emulation
   constexpr float kStickDeadzone = 8000.0f / 32767.0f;
-  const float rx = state.gamepad.thumb_rx / 32767.0f;
-  const float ry = state.gamepad.thumb_ry / 32767.0f;
+  const float rx = gamepad.thumb_rx / 32767.0f;
+  const float ry = gamepad.thumb_ry / 32767.0f;
+  io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickLeft, rx < -kStickDeadzone,
+                       rx < 0 ? -rx : 0.0f);
+  io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickRight, rx > kStickDeadzone,
+                       rx > 0 ? rx : 0.0f);
+  io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickUp, ry > kStickDeadzone,
+                       ry > 0 ? ry : 0.0f);
+  io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickDown, ry < -kStickDeadzone,
+                       ry < 0 ? -ry : 0.0f);
 
-  io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickLeft,  rx < -kStickDeadzone, rx < 0 ? -rx : 0.0f);
-  io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickRight, rx >  kStickDeadzone, rx > 0 ?  rx : 0.0f);
-  io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickUp,    ry >  kStickDeadzone, ry > 0 ?  ry : 0.0f);
-  io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickDown,  ry < -kStickDeadzone, ry < 0 ? -ry : 0.0f);
-
-  // Triggers as L2/R2
+  const float lt = gamepad.left_trigger / 255.0f;
+  const float rt = gamepad.right_trigger / 255.0f;
   constexpr float kTriggerDeadzone = 30.0f / 255.0f;
-  const float lt = state.gamepad.left_trigger / 255.0f;
-  const float rt = state.gamepad.right_trigger / 255.0f;
-  io.AddKeyAnalogEvent(ImGuiKey_GamepadL2, lt > kTriggerDeadzone, lt);
-  io.AddKeyAnalogEvent(ImGuiKey_GamepadR2, rt > kTriggerDeadzone, rt);
+  io.AddKeyAnalogEvent(ImGuiKey_GamepadL2,
+                       !s_modal_navigation_capture && lt > kTriggerDeadzone,
+                       !s_modal_navigation_capture ? lt : 0.0f);
+  io.AddKeyAnalogEvent(ImGuiKey_GamepadR2,
+                       !s_modal_navigation_capture && rt > kTriggerDeadzone,
+                       !s_modal_navigation_capture ? rt : 0.0f);
+
 }
 
 void RecurseFolderForGames(std::string path) {
@@ -269,13 +378,32 @@ void RecurseFolderForGames(std::string path) {
 
     for (auto file : std::filesystem::directory_iterator(path)) {
       if (file.is_directory() && file.path().string() != path) {
-        RecurseFolderForGames(file.path().string());
+        // Don't index Xenia's own content/cache/storage trees as games. DLC,
+        // title updates and caches may contain STFS/XEX-like files that would
+        // otherwise appear as duplicate game entries.
+        if (!IsConfiguredStorageRoot(file.path())) {
+          RecurseFolderForGames(file.path().string());
+        }
         continue;
       }
 
       if (!file.is_regular_file()) continue;
 
-      switch (xe::GetFileSignature(file.path())) {
+      // Don't mount/parse disc images while scanning the frontend library.
+      // Xbox storage can make synchronous XISO probing stall the UI thread.
+      // Listing by extension is enough here; LaunchPath validates the image
+      // when the user actually starts the game.
+      std::string extension = file.path().extension().string();
+      std::transform(extension.begin(), extension.end(), extension.begin(),
+                     [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                     });
+      if (extension == ".iso") {
+        AddGameEntry(file.path(), file.path().stem().string());
+        continue;
+      }
+
+      switch (xe::GetFileSignature(file.path(), false)) {
         case xe::Emulator::FileSignatureType::XEX1:
         case xe::Emulator::FileSignatureType::XEX2: {
           const bool is_default_xex =
@@ -296,7 +424,8 @@ void RecurseFolderForGames(std::string path) {
         }
         case xe::Emulator::FileSignatureType::CON:
         case xe::Emulator::FileSignatureType::PIRS:
-        case xe::Emulator::FileSignatureType::ZAR: {
+        case xe::Emulator::FileSignatureType::ZAR:
+        case xe::Emulator::FileSignatureType::XISO: {
           std::string filename = file.path().stem().string();
 
           AddGameEntry(file.path(), filename);
@@ -347,8 +476,35 @@ void UWP::RefreshPaths() {
     while (std::getline(ss, item, ';')) {
       if (item.empty()) continue;
 
-      RecurseFolderForGames(item);
+      const std::string normalized_item = NormalizeScannedPath(item);
+      const bool duplicate = std::any_of(
+          s_paths.cbegin(), s_paths.cend(), [&](const std::string& existing) {
+            return NormalizeScannedPath(existing) == normalized_item;
+          });
+      if (duplicate) {
+        continue;
+      }
+
       s_paths.push_back(item);
+      RecurseFolderForGames(item);
+    }
+  }
+  std::stringstream deduped_paths_stream;
+  for (const auto& path : s_paths) {
+    deduped_paths_stream << path << ";";
+  }
+  const std::string deduped_paths = deduped_paths_stream.str();
+  if (deduped_paths != cvars::gamepaths) {
+    auto gamepaths_it = cvar::ConfigVars->find("gamepaths");
+    if (gamepaths_it != cvar::ConfigVars->end()) {
+      auto* gamepaths_config =
+          dynamic_cast<cvar::ConfigVar<std::string>*>(gamepaths_it->second);
+      if (gamepaths_config) {
+        XELOGI("[UWP] Cleaning duplicate game paths: '{}' -> '{}'",
+               cvars::gamepaths, deduped_paths);
+        gamepaths_config->SetConfigValue(deduped_paths);
+        config::SaveConfig();
+      }
     }
   }
 
@@ -363,15 +519,28 @@ std::vector<std::tuple<std::string, std::string>> UWP::GetGames() {
 
 void UWP::SetGamePaths(std::vector<std::string> paths) {
   s_paths.clear();
-  s_paths.insert(s_paths.end(), paths.begin(), paths.end());
+  for (const auto& path : paths) {
+    if (path.empty()) {
+      continue;
+    }
+    const std::string normalized_path = NormalizeScannedPath(path);
+    const bool duplicate = std::any_of(
+        s_paths.cbegin(), s_paths.cend(), [&](const std::string& existing) {
+          return NormalizeScannedPath(existing) == normalized_path;
+        });
+    if (!duplicate) {
+      s_paths.push_back(path);
+    }
+  }
+
   std::stringstream ss;
-  for (auto p : s_paths) {
-    ss << p << ";";
+  for (const auto& path : s_paths) {
+    ss << path << ";";
   }
 
   auto cpaths = dynamic_cast<cvar::ConfigVar<std::string>*>(
       cvar::ConfigVars->find("gamepaths")->second);
-    cpaths->SetConfigValue(ss.str());
+  cpaths->SetConfigValue(ss.str());
   config::SaveConfig();
   RefreshPaths();
 }

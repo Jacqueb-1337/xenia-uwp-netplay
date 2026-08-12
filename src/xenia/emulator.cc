@@ -451,7 +451,7 @@ X_STATUS Emulator::MountPath(const std::filesystem::path& path,
 }
 
 Emulator::FileSignatureType GetFileSignature(
-    const std::filesystem::path& path) {
+    const std::filesystem::path& path, bool probe_xiso) {
   FILE* file = xe::filesystem::OpenFile(path, "rb");
 
   if (!file) {
@@ -508,6 +508,10 @@ Emulator::FileSignatureType GetFileSignature(
 
   if (xe::vfs::kZarMagic == magic_value) {
     return Emulator::FileSignatureType::ZAR;
+  }
+
+  if (!probe_xiso) {
+    return Emulator::FileSignatureType::Unknown;
   }
 
   // Check if XISO

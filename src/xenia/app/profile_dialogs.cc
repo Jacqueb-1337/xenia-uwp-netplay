@@ -20,6 +20,9 @@
 #include "xenia/kernel/xam/xam_ui.h"
 #include "xenia/kernel/xam/user_tracker.h"
 #include "xenia/ui/file_picker.h"
+#if XE_PLATFORM_WINRT
+#include "xenia-canary-uwp/XeniaUWP.h"
+#endif
 
 #include "xenia/kernel/xam/ui/create_profile_ui.h"
 #include "xenia/kernel/xam/ui/gamercard_ui.h"
@@ -57,7 +60,14 @@ void NoProfileDialog::OnDraw(ImGuiIO& io) {
                              ->xam_state()
                              ->profile_manager();
 
+#if XE_PLATFORM_WINRT
+  UWP::SetModalNavigationCapture(true);
+#endif
+
   if (profile_manager->GetAccountCount()) {
+#if XE_PLATFORM_WINRT
+    UWP::SetModalNavigationCapture(false);
+#endif
     Close();
     return;
   }
@@ -124,8 +134,21 @@ void NoProfileDialog::OnDraw(ImGuiIO& io) {
   bool should_close = false;
   bool should_open_create_profile = false;
   bool should_open_profile_menu = false;
-  if (!child_dialog_open && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
-    should_close = true;
+  bool activate_selected = false;
+  if (!child_dialog_open) {
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown, false)) {
+      selected_action_ = (selected_action_ + 1) % 3;
+      XELOGI("NoProfileDialog: selection {}", selected_action_);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp, false)) {
+      selected_action_ = (selected_action_ + 2) % 3;
+      XELOGI("NoProfileDialog: selection {}", selected_action_);
+    }
+    activate_selected =
+        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false);
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+      should_close = true;
+    }
   }
 
   const xe::app::OverlayHeaderLayout header_layout =
@@ -147,26 +170,38 @@ void NoProfileDialog::OnDraw(ImGuiIO& io) {
   const char* create_label =
       content_files.empty() ? "Create Profile" : "Create profile & migrate data";
   if (focus_requested_) {
-    ImGui::SetKeyboardFocusHere();
+    selected_action_ = 0;
     focus_requested_ = false;
   }
 
   ImGui::BeginDisabled(child_dialog_open);
   ImGui::SetCursorScreenPos(
       ImVec2(overlay_min.x + panel_padding.x, ImGui::GetCursorScreenPos().y));
-  if (DrawTextEffectButton(create_label, button_size)) {
+  if (!child_dialog_open && selected_action_ == 0) {
+    ImGui::SetKeyboardFocusHere();
+  }
+  if (DrawTextEffectButton(create_label, button_size) ||
+      (activate_selected && selected_action_ == 0)) {
     should_open_create_profile = true;
   }
   ImGui::Spacing();
   ImGui::SetCursorScreenPos(
       ImVec2(overlay_min.x + panel_padding.x, ImGui::GetCursorScreenPos().y));
-  if (DrawTextEffectButton("Open profile menu", button_size)) {
+  if (!child_dialog_open && selected_action_ == 1) {
+    ImGui::SetKeyboardFocusHere();
+  }
+  if (DrawTextEffectButton("Open profile menu", button_size) ||
+      (activate_selected && selected_action_ == 1)) {
     should_open_profile_menu = true;
   }
   ImGui::Spacing();
   ImGui::SetCursorScreenPos(
       ImVec2(overlay_min.x + panel_padding.x, ImGui::GetCursorScreenPos().y));
-  if (DrawTextEffectButton("Close", button_size)) {
+  if (!child_dialog_open && selected_action_ == 2) {
+    ImGui::SetKeyboardFocusHere();
+  }
+  if (DrawTextEffectButton("Close", button_size) ||
+      (activate_selected && selected_action_ == 2)) {
     should_close = true;
   }
   ImGui::EndDisabled();
@@ -207,6 +242,9 @@ void NoProfileDialog::OnDraw(ImGuiIO& io) {
   }
 
   if (should_close) {
+#if XE_PLATFORM_WINRT
+    UWP::SetModalNavigationCapture(false);
+#endif
     emulator_window_->SetHotkeysState(true);
     delete this;
     return;

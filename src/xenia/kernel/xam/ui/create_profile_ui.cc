@@ -8,6 +8,7 @@
  */
 
 #include "xenia/kernel/xam/ui/create_profile_ui.h"
+#include <algorithm>
 #include "xenia/app/ui_text_effect_helpers.h"
 #include "xenia/emulator.h"
 #if XE_PLATFORM_WINRT
@@ -23,7 +24,7 @@ void CreateProfileUI::OnDraw(ImGuiIO& io) {
 #if XE_PLATFORM_WINRT
   if (!has_opened_) {
     has_opened_ = true;
-    UWP::ShowKeyboard();
+    UWP::BeginTextInput(gamertag_);
   }
 
   bool should_close = false;
@@ -122,10 +123,21 @@ void CreateProfileUI::OnDraw(ImGuiIO& io) {
       gamertag_focus_requested_ = false;
     }
 
+    const std::string osk_text = UWP::GetTextInput();
+    if (osk_text != gamertag_) {
+      std::fill(std::begin(gamertag_), std::end(gamertag_), '\0');
+      std::copy_n(osk_text.data(),
+                  std::min(osk_text.size(), sizeof(gamertag_) - 1), gamertag_);
+    }
+
     xe::app::DrawConfiguredLabel("Gamertag:");
     ImGui::SetNextItemWidth(field_width);
     xe::app::DrawConfiguredInputText("##Gamertag", gamertag_,
                                      sizeof(gamertag_));
+    if (ImGui::IsItemFocused() && !UWP::IsTextInputActive() &&
+        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false)) {
+      UWP::BeginTextInput(gamertag_);
+    }
 
     const std::string gamertag_string = std::string(gamertag_);
     bool valid = profile_manager->IsGamertagValid(gamertag_string);
@@ -158,6 +170,7 @@ void CreateProfileUI::OnDraw(ImGuiIO& io) {
   ImGui::PopStyleVar(3);
 
   if (should_close) {
+    UWP::EndTextInput();
     Close();
   }
 #else

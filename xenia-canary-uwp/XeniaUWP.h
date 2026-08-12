@@ -18,6 +18,8 @@ void StartXenia();
 void ExecutePendingFunctionsFromUIThread();
 void RegisterXeniaWindow(xe::ui::Window* window);
 void UpdateImGuiIO();
+void SetModalNavigationCapture(bool capture);
+bool IsModalNavigationCaptured();
 
 void RefreshPaths();
 std::vector<std::tuple<std::string, std::string>> GetGames();

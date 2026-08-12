@@ -889,7 +889,10 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   io.FontGlobalScale = ((float) io.DisplaySize.x / 1920.0f) * 2.4f; 
 
   if (!dialogs_.empty()) {
+#if !XE_PLATFORM_WINRT
+    // WinRT feeds controller input from UWPWindow::RequestPaintImpl().
     UpdateGamepads();
+#endif
   }
 
   ImGui::NewFrame();
@@ -1327,6 +1330,7 @@ void ImGuiDrawer::DetachIfLastWindowRemoved() {
 }
 
 void ImGuiDrawer::UpdateGamepads() {
+
   if (!input_system_) {
     return;
   }

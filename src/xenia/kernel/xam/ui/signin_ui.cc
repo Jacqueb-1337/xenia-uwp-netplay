@@ -23,6 +23,9 @@ namespace xam {
 namespace ui {
 
 void SigninUI::OnClose() {
+#if XE_PLATFORM_WINRT
+  UWP::EndTextInput();
+#endif
   auto pending_login_profiles = std::move(pending_login_profiles_);
   XamDialog::OnClose();
   DispatchPendingLogins(std::move(pending_login_profiles));
@@ -46,6 +49,18 @@ void SigninUI::OnDraw(ImGuiIO& io) {
     has_opened_ = true;
     ReloadProfiles(true);
     ImGui::OpenPopup(kSigninPopupName);
+  } else if (profiles_reload_requested_) {
+    ReloadProfiles(false);
+    profiles_reload_requested_ = false;
+    if (pending_created_profile_xuid_ != 0) {
+      for (uint32_t i = 0; i < users_needed_; ++i) {
+        if (chosen_slots_[i] != XUserIndexAny) {
+          chosen_xuids_[i] = pending_created_profile_xuid_;
+          break;
+        }
+      }
+      pending_created_profile_xuid_ = 0;
+    }
   }
 
   const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -250,9 +265,6 @@ void SigninUI::OnDraw(ImGuiIO& io) {
   if (xe::app::DrawTextEffectButton("Create Profile", create_button_size)) {
     creating_profile_ = true;
     creating_profile_focus_requested_ = true;
-#if XE_PLATFORM_WINRT
-    UWP::ShowKeyboard();
-#endif
   }
   ImGui::Spacing();
 
@@ -338,6 +350,9 @@ void SigninUI::OnDraw(ImGuiIO& io) {
                                       create_min, create_max);
 
     if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+#if XE_PLATFORM_WINRT
+      UWP::EndTextInput();
+#endif
       std::fill(std::begin(gamertag_), std::end(gamertag_), '\0');
       creating_profile_ = false;
       creating_profile_focus_requested_ = false;
@@ -366,9 +381,17 @@ void SigninUI::OnDraw(ImGuiIO& io) {
       ImGui::SetKeyboardFocusHere();
       creating_profile_focus_requested_ = false;
 #if XE_PLATFORM_WINRT
-      UWP::ShowKeyboard();
+      UWP::BeginTextInput(gamertag_);
 #endif
     }
+#if XE_PLATFORM_WINRT
+    const std::string osk_text = UWP::GetTextInput();
+    if (osk_text != gamertag_) {
+      std::fill(std::begin(gamertag_), std::end(gamertag_), '\0');
+      std::copy_n(osk_text.data(),
+                  std::min(osk_text.size(), sizeof(gamertag_) - 1), gamertag_);
+    }
+#endif
     ImGui::SetCursorScreenPos(
         ImVec2(create_content_x, ImGui::GetCursorScreenPos().y));
     ImGui::PushItemWidth(create_button_size.x);
@@ -376,8 +399,8 @@ void SigninUI::OnDraw(ImGuiIO& io) {
                                      sizeof(gamertag_));
     ImGui::PopItemWidth();
 #if XE_PLATFORM_WINRT
-    if (ImGui::IsItemActivated()) {
-      UWP::ShowKeyboard();
+    if (ImGui::IsItemActivated() && !UWP::IsTextInputActive()) {
+      UWP::BeginTextInput(gamertag_);
     }
 #endif
     const std::string gamertag_string = gamertag_;
@@ -388,17 +411,32 @@ void SigninUI::OnDraw(ImGuiIO& io) {
                ImGui::GetCursorScreenPos().y + (10.0f * uy)));
     ImGui::BeginDisabled(!valid);
     if (xe::app::DrawTextEffectButton("Create", create_button_size)) {
-      profile_manager->CreateProfile(gamertag_string, false);
-      std::fill(std::begin(gamertag_), std::end(gamertag_), '\0');
-      creating_profile_ = false;
-      creating_profile_focus_requested_ = false;
-      focus_requested_ = true;
-      ReloadProfiles(false);
+      uint64_t created_xuid = 0;
+      const bool created = profile_manager->CreateProfile(
+          gamertag_string, false, false, 0, &created_xuid);
+      if (created) {
+        XELOGI("SigninUI: created profile {:016X}; scheduling profile refresh",
+               created_xuid);
+#if XE_PLATFORM_WINRT
+        UWP::EndTextInput();
+#endif
+        std::fill(std::begin(gamertag_), std::end(gamertag_), '\0');
+        creating_profile_ = false;
+        creating_profile_focus_requested_ = false;
+        focus_requested_ = true;
+        pending_created_profile_xuid_ = created_xuid;
+        profiles_reload_requested_ = true;
+      } else {
+        XELOGE("SigninUI: failed to create profile '{}'.", gamertag_string);
+      }
     }
     ImGui::EndDisabled();
     ImGui::SameLine(0.0f, create_button_gap);
 
     if (xe::app::DrawTextEffectButton("Cancel", create_button_size)) {
+#if XE_PLATFORM_WINRT
+      UWP::EndTextInput();
+#endif
       std::fill(std::begin(gamertag_), std::end(gamertag_), '\0');
       creating_profile_ = false;
       creating_profile_focus_requested_ = false;

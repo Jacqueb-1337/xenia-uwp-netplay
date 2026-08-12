@@ -49,6 +49,7 @@
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/kernel/xconfig.h"
 #include "xenia/kernel/xam/ui/create_profile_ui.h"
 #include "xenia/kernel/xam/xam_module.h"
 //#include "xenia/ui/file_picker.h"
@@ -83,8 +84,6 @@ DECLARE_bool(guide_button);
 DECLARE_bool(clear_memory_page_state);
 
 DECLARE_string(readback_resolve);
-
-DECLARE_int32(user_language);
 
 DECLARE_bool(readback_memexport);
 
@@ -1147,6 +1146,67 @@ void EmulatorWindow::InstallContent() {
       for (auto path : files) {
         try {
           auto abs_path = std::filesystem::absolute(path);
+          std::string extension = abs_path.extension().string();
+          std::transform(extension.begin(), extension.end(), extension.begin(),
+                         [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                         });
+
+          if (extension == ".zip") {
+            const std::filesystem::path staging_root =
+                std::filesystem::path(UWP::GetLocalCache()) /
+                "content_zip_import";
+            std::error_code cleanup_ec;
+            std::filesystem::remove_all(staging_root, cleanup_ec);
+
+            std::vector<std::string> package_files;
+            std::string extract_error;
+            if (!UWP::ExtractContentPackageZip(
+                    xe::path_to_utf8(abs_path), xe::path_to_utf8(staging_root),
+                    &package_files, &extract_error)) {
+              std::filesystem::remove_all(staging_root, cleanup_ec);
+              xe::ui::ImGuiDialog::ShowMessageBox(
+                  imgui_drawer_.get(), "Failed to install content ZIP",
+                  extract_error.empty()
+                      ? "The ZIP could not be imported."
+                      : extract_error);
+              continue;
+            }
+
+            int installed = 0;
+            int failed = 0;
+            for (const auto& package_file : package_files) {
+              auto package_path = std::filesystem::absolute(package_file);
+              Emulator::ContentInstallEntry install_entry(package_path);
+              const auto result =
+                  emulator_->InstallContentPackage(package_path, install_entry);
+              if (result == X_STATUS_SUCCESS) {
+                ++installed;
+              } else {
+                ++failed;
+                XELOGE("Failed to install content package '{}' from ZIP. "
+                       "Error code: {:08X}",
+                       xe::path_to_utf8(package_path), result);
+              }
+            }
+
+            std::filesystem::remove_all(staging_root, cleanup_ec);
+            if (failed == 0) {
+              xe::ui::ImGuiDialog::ShowMessageBox(
+                  imgui_drawer_.get(), "Content installed",
+                  fmt::format("Installed {} DLC/title update package(s) from "
+                              "the ZIP.",
+                              installed));
+            } else {
+              xe::ui::ImGuiDialog::ShowMessageBox(
+                  imgui_drawer_.get(), "Content ZIP partially installed",
+                  fmt::format("Installed {} package(s); {} failed. Check "
+                              "xenia.log for details.",
+                              installed, failed));
+            }
+            continue;
+          }
+
           Emulator::ContentInstallEntry install_entry(abs_path);
           auto result = emulator_->InstallContentPackage(abs_path, install_entry);
 
@@ -1156,7 +1216,8 @@ void EmulatorWindow::InstallContent() {
                 "Failed to install content!\n\nCheck xenia.log for technical "
                 "details.");
           }
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
+          XELOGE("Exception while installing selected content: {}", e.what());
           xe::ui::ImGuiDialog::ShowMessageBox(
               imgui_drawer_.get(), "Failed to install content!",
               "Exception while installing selected content.\n\nCheck xenia.log "
@@ -1616,7 +1677,7 @@ EmulatorWindow::ControllerHotKey EmulatorWindow::ProcessControllerHotkey(
     // Must clear dialogs to prevent stacking
     imgui_drawer_.get()->ClearDialogs();
 
-    // Titles may contain Unicode characters such as At World�s End
+    // Titles may contain Unicode characters such as At Worldï¿½s End
     // Must use ImGUI font that can render these Unicode characters
     std::string title_name;
 
@@ -2140,11 +2201,13 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
       int page_index = static_cast<int>(active_frontend_page_);
       page_index = (page_index + page_count - 1) % page_count;
       active_frontend_page_ = static_cast<FrontendPage>(page_index);
+      XELOGI("UWP frontend page changed with LB to {}", page_index);
     }
     if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) {
       int page_index = static_cast<int>(active_frontend_page_);
       page_index = (page_index + 1) % page_count;
       active_frontend_page_ = static_cast<FrontendPage>(page_index);
+      XELOGI("UWP frontend page changed with RB to {}", page_index);
     }
 
     auto draw_nav_button = [this, display_scale](const char* label,
@@ -3061,7 +3124,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           }
           std::string fallback = row.title_id.empty() ? row.filename : row.title_id;
           if (fallback == display_title) {
-            fallback = row.filename;
+            return std::string{};
           }
           return fallback;
         };
@@ -3478,8 +3541,10 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                   ImGui::TextDisabled("Type: %s",
                                       selected_row->metadata.title_type.c_str());
                 }
-              } else {
+              } else if (!selected_row->title_id.empty()) {
                 ImGui::TextDisabled("Metadata: Fetching from x360db...");
+              } else {
+                ImGui::TextDisabled("Metadata: Waiting for a Title ID...");
               }
             }
           }
@@ -4270,6 +4335,10 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               action_popup_mode_ = ActionPopupMode::kInfo;
               show_action_status_ = true;
             }
+          }
+
+          if (draw_game_context_option("Install DLC / Update ZIP")) {
+            emulator_window_.InstallContent();
           }
 
           if (draw_game_context_option("Manage DLC")) {
@@ -5955,9 +6024,12 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
             tooltip = c_controller_hotkeys->description();
           }
 
-          auto c_user_language = dynamic_cast<cvar::ConfigVar<int32_t>*>(
-              cvar::ConfigVars->find("user_language")->second);
-          int32_t user_language = c_user_language->GetTypedConfigValue();
+          auto* xconfig =
+              emulator_window_.emulator()->kernel_state()->xconfig();
+          int32_t user_language = static_cast<int32_t>(
+              xconfig->ReadSetting<uint32_t>(
+                  kernel::XCONFIG_USER_CATEGORY,
+                  kernel::XCONFIG_USER_CATEGORY_ENTRIES::XCONFIG_USER_LANGUAGE));
           struct LanguageOption {
             int32_t value;
             const char* label;
@@ -5989,8 +6061,12 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               for (const auto& option : kLanguageOptions) {
                 const bool is_selected = user_language == option.value;
                 if (ImGui::Selectable(option.label, is_selected)) {
-                  c_user_language->SetConfigValue(option.value);
-                  config::SaveConfig();
+                  xe::be<uint32_t> language_value =
+                      static_cast<uint32_t>(option.value);
+                  xconfig->WriteSetting(
+                      kernel::XCONFIG_USER_CATEGORY,
+                      kernel::XCONFIG_USER_CATEGORY_ENTRIES::XCONFIG_USER_LANGUAGE,
+                      &language_value);
                   user_language = option.value;
                 }
                 if (is_selected) {
@@ -6002,7 +6078,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           }
 
           if (ImGui::IsItemFocused()) {
-            tooltip = c_user_language->description();
+            tooltip = "Console language stored in the emulated Xbox 360 XConfig.";
           }
 
           ImGui::Spacing();
@@ -6522,43 +6598,6 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
             tooltip = c_render_target_path->description();
           }
 
-          auto c_gamma_rt = dynamic_cast<cvar::ConfigVar<bool>*>(
-              cvar::ConfigVars->find("gamma_render_target_as_srgb")->second);
-          if (ImGui::Checkbox("Gamma Render Target As sRGB",
-                              c_gamma_rt->current_value())) {
-            c_gamma_rt->SetConfigValue(!c_gamma_rt->GetTypedConfigValue());
-            config::SaveConfig();
-          }
-
-          if (ImGui::IsItemFocused()) {
-            tooltip = c_gamma_rt->description();
-          }
-
-          auto c_query_lower = dynamic_cast<cvar::ConfigVar<int32_t>*>(
-              cvar::ConfigVars->find("query_occlusion_sample_lower_threshold")
-                  ->second);
-          int query_lower = c_query_lower->GetTypedConfigValue();
-          if (ImGui::InputInt("Query Occlusion Lower Threshold", &query_lower)) {
-            c_query_lower->SetConfigValue(query_lower);
-            config::SaveConfig();
-          }
-
-          if (ImGui::IsItemFocused()) {
-            tooltip = c_query_lower->description();
-          }
-
-          auto c_query_upper = dynamic_cast<cvar::ConfigVar<int32_t>*>(
-              cvar::ConfigVars->find("query_occlusion_sample_upper_threshold")
-                  ->second);
-          int query_upper = c_query_upper->GetTypedConfigValue();
-          if (ImGui::InputInt("Query Occlusion Upper Threshold", &query_upper)) {
-            c_query_upper->SetConfigValue(query_upper);
-            config::SaveConfig();
-          }
-
-          if (ImGui::IsItemFocused()) {
-            tooltip = c_query_upper->description();
-          }
 
           auto c_fuzzy_alpha = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("use_fuzzy_alpha_epsilon")->second);
@@ -7397,95 +7436,43 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
         }
 
         if (settings_selected_section == 9) {
-          auto c_internal_resolution = dynamic_cast<cvar::ConfigVar<uint32_t>*>(
-              cvar::ConfigVars->find("internal_display_resolution")->second);
-          uint32_t resolution_value = c_internal_resolution->GetTypedConfigValue();
-          const char* resolution_labels[] = {
-              "640x480",   "640x576",   "720x480",   "720x576",  "800x600",
-              "848x480",   "1024x768",  "1152x864",  "1280x720", "1280x768",
-              "1280x960",  "1280x1024", "1360x768",  "1440x900", "1680x1050",
-              "1920x540",  "1920x1080"};
-          const uint32_t max_resolution_index = 17;
-          uint32_t ui_index = resolution_value;
-          if (ui_index > max_resolution_index) {
-            ui_index = max_resolution_index;
-          }
-          const char* resolution_preview =
-              ui_index == 17 ? "Custom" : resolution_labels[ui_index];
-          {
-            ScopedAccentComboStyle accent_combo_style;
-            if (ImGui::BeginCombo("Internal Display Resolution", resolution_preview)) {
-              for (uint32_t i = 0; i <= 16; ++i) {
-                if (ImGui::Selectable(resolution_labels[i], ui_index == i)) {
-                  c_internal_resolution->SetConfigValue(i);
-                  config::SaveConfig();
-                }
-              }
-              if (ImGui::Selectable("Custom", ui_index == 17)) {
-                c_internal_resolution->SetConfigValue(17);
-                config::SaveConfig();
-              }
-              ImGui::EndCombo();
-            }
-          }
+          auto c_custom_resolution_x =
+              dynamic_cast<cvar::ConfigVar<uint32_t>*>(
+                  cvar::ConfigVars->find("custom_internal_display_resolution_x")
+                      ->second);
+          auto c_custom_resolution_y =
+              dynamic_cast<cvar::ConfigVar<uint32_t>*>(
+                  cvar::ConfigVars->find("custom_internal_display_resolution_y")
+                      ->second);
 
-          if (ImGui::IsItemFocused()) {
-            tooltip = c_internal_resolution->description();
-          }
+          ImGui::TextWrapped(
+              "Set both custom resolution values to 0 to use the Xbox 360 "
+              "console display resolution.");
 
-          if (c_internal_resolution->GetTypedConfigValue() == 17) {
-            auto c_internal_resolution_x =
-                dynamic_cast<cvar::ConfigVar<uint32_t>*>(
-                    cvar::ConfigVars->find("internal_display_resolution_x")
-                        ->second);
-            auto c_internal_resolution_y =
-                dynamic_cast<cvar::ConfigVar<uint32_t>*>(
-                    cvar::ConfigVars->find("internal_display_resolution_y")
-                        ->second);
-
-            int custom_x =
-                static_cast<int>(c_internal_resolution_x->GetTypedConfigValue());
-            if (ImGui::InputInt("Custom Resolution Width", &custom_x)) {
-              if (custom_x < 1) custom_x = 1;
-              if (custom_x > 1920) custom_x = 1920;
-              c_internal_resolution_x->SetConfigValue(
-                  static_cast<uint32_t>(custom_x));
-              config::SaveConfig();
-            }
-
-            int custom_y =
-                static_cast<int>(c_internal_resolution_y->GetTypedConfigValue());
-            if (ImGui::InputInt("Custom Resolution Height", &custom_y)) {
-              if (custom_y < 1) custom_y = 1;
-              if (custom_y > 1080) custom_y = 1080;
-              c_internal_resolution_y->SetConfigValue(
-                  static_cast<uint32_t>(custom_y));
-              config::SaveConfig();
-            }
-          }
-
-          auto c_widescreen = dynamic_cast<cvar::ConfigVar<bool>*>(
-              cvar::ConfigVars->find("widescreen")->second);
-          if (ImGui::Checkbox("Widescreen", c_widescreen->current_value())) {
-            c_widescreen->SetConfigValue(!c_widescreen->GetTypedConfigValue());
+          int custom_x =
+              static_cast<int>(c_custom_resolution_x->GetTypedConfigValue());
+          if (ImGui::InputInt("Custom Resolution Width", &custom_x)) {
+            if (custom_x < 0) custom_x = 0;
+            if (custom_x > 1920) custom_x = 1920;
+            c_custom_resolution_x->SetConfigValue(
+                static_cast<uint32_t>(custom_x));
             config::SaveConfig();
           }
-
           if (ImGui::IsItemFocused()) {
-            tooltip = c_widescreen->description();
+            tooltip = c_custom_resolution_x->description();
           }
 
-          auto c_use_50hz_mode = dynamic_cast<cvar::ConfigVar<bool>*>(
-              cvar::ConfigVars->find("use_50Hz_mode")->second);
-          if (ImGui::Checkbox("Use 50Hz Video Mode",
-                              c_use_50hz_mode->current_value())) {
-            c_use_50hz_mode->SetConfigValue(
-                !c_use_50hz_mode->GetTypedConfigValue());
+          int custom_y =
+              static_cast<int>(c_custom_resolution_y->GetTypedConfigValue());
+          if (ImGui::InputInt("Custom Resolution Height", &custom_y)) {
+            if (custom_y < 0) custom_y = 0;
+            if (custom_y > 1080) custom_y = 1080;
+            c_custom_resolution_y->SetConfigValue(
+                static_cast<uint32_t>(custom_y));
             config::SaveConfig();
           }
-
           if (ImGui::IsItemFocused()) {
-            tooltip = c_use_50hz_mode->description();
+            tooltip = c_custom_resolution_y->description();
           }
 
           auto c_interlaced = dynamic_cast<cvar::ConfigVar<bool>*>(
@@ -7816,6 +7803,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
             ImGui::EndPopup();
           }
 
+          ImGui::Unindent(paths_content_offset_x);
           ImGui::EndChild();
         }
         ImGui::PopStyleVar();
@@ -7845,7 +7833,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           ImGui::Indent(about_content_offset_x);
 
           ImGui::TextWrapped(
-              "Xenia Canary UWP 1.1.7.1\n"
+              "Xenia Canary UWP 1.1.7.23\n"
               "A Unofficial fork of Xenia focusing on Xbox support and a blades "
               "style frontend.\n");
 
@@ -7920,8 +7908,8 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               "This UWP Xbox Port was originally made by SirMangler and the "
               "hardwork of all the Xenia Project contributers over the years\n");
 
-          ImGui::EndChild();
           ImGui::Unindent(about_content_offset_x);
+          ImGui::EndChild();
         }
         ImGui::PopStyleVar();
 

@@ -55,6 +55,8 @@ class SigninUI final : public XamDialog {
 
   bool creating_profile_ = false;
   bool creating_profile_focus_requested_ = false;
+  bool profiles_reload_requested_ = false;
+  uint64_t pending_created_profile_xuid_ = 0;
   char gamertag_[16] = "";
 
   std::shared_ptr<xe::ui::ImmediateTexture> button_a_tex_;

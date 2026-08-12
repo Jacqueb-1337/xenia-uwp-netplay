@@ -387,7 +387,8 @@ class Emulator {
 };
 
 // Determine the executable signature
-Emulator::FileSignatureType GetFileSignature(const std::filesystem::path& path);
+Emulator::FileSignatureType GetFileSignature(const std::filesystem::path& path,
+                                             bool probe_xiso = true);
 
 
 }  // namespace xe

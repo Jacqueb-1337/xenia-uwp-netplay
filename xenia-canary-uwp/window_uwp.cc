@@ -1,5 +1,6 @@
 #include "window_uwp.h"
 #include "surface_uwp.h"
+#include "xenia/base/logging.h"
 
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
@@ -29,6 +30,7 @@ UWPWindow::~UWPWindow() {}
 
 void UWPWindow::SetXInputDriver(xe::hid::xinput::XInputInputDriver* driver) {
   input_driver = driver;
+  XELOGI("[UWP] XInput driver attached to frontend window");
 }
 
 // May return nullptr!
@@ -74,6 +76,9 @@ bool UWPWindow::OpenImpl() {
 }
 
 void UWPWindow::RequestPaintImpl() { 
+  // The UWP frontend is painted through this path, not ImGuiDrawer::Draw.
+  // Feed controller/keyboard events once here before the frame is drawn.
+  UWP::RegisterXeniaWindow(this);
   UWP::UpdateImGuiIO();
   OnPaint(); 
 }

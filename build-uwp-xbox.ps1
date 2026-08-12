@@ -5,14 +5,26 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $project = Join-Path $root 'xenia-canary-uwp\xenia-canary-uwp.vcxproj'
-$cppWinRTProps = Join-Path $root 'build\packages\Microsoft.Windows.CppWinRT.2.0.220110.5\build\native\Microsoft.Windows.CppWinRT.props'
+$packagesConfig = Join-Path $root 'xenia-canary-uwp\packages.config'
 
 if (!(Test-Path $project)) {
   throw "UWP project not found: $project"
 }
+if (!(Test-Path $packagesConfig)) {
+  throw "UWP packages.config not found: $packagesConfig"
+}
 
+[xml]$packagesXml = Get-Content -LiteralPath $packagesConfig
+$cppWinRTPackage = $packagesXml.packages.package |
+  Where-Object { $_.id -eq 'Microsoft.Windows.CppWinRT' } |
+  Select-Object -First 1
+if (!$cppWinRTPackage) {
+  throw 'Microsoft.Windows.CppWinRT is not declared in xenia-canary-uwp\packages.config.'
+}
+$cppWinRTVersion = [string]$cppWinRTPackage.version
+$cppWinRTProps = Join-Path $root "build\packages\Microsoft.Windows.CppWinRT.$cppWinRTVersion\build\native\Microsoft.Windows.CppWinRT.props"
 if (!(Test-Path $cppWinRTProps)) {
-  throw 'Microsoft.Windows.CppWinRT 2.0.220110.5 is not restored under build\packages. Restore xenia-canary-uwp\packages.config first.'
+  throw "Microsoft.Windows.CppWinRT $cppWinRTVersion is not restored under build\packages. Restore xenia-canary-uwp\packages.config first."
 }
 
 $msbuildCandidates = @(

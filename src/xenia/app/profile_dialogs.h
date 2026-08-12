@@ -40,6 +40,7 @@ class NoProfileDialog final : public ui::ImGuiDialog {
 
   EmulatorWindow* emulator_window_;
   bool focus_requested_ = true;
+  int selected_action_ = 0;
 };
 
 class ProfileConfigDialog final : public ui::ImGuiDialog {

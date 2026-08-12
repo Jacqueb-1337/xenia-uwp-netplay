@@ -177,7 +177,19 @@ X_RESULT XInputInputDriver::GetState(uint32_t user_index,
   }
 
   out_state->packet_number = native_state.state.dwPacketNumber;
-  out_state->gamepad.buttons = native_state.state.Gamepad.wButtons;
+  uint16_t buttons = native_state.state.Gamepad.wButtons;
+#if XE_PLATFORM_WINRT
+  // Xbox UWP can't receive the physical Xbox button through normal XInput.
+  // Treat Start + View/Back as the Xbox 360 Guide button instead. Consume the
+  // original two buttons so games don't receive Start and Back at the same
+  // time as the synthetic Guide press.
+  constexpr uint16_t kGuideCombo = XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK;
+  if ((buttons & kGuideCombo) == kGuideCombo) {
+    buttons = static_cast<uint16_t>((buttons & ~kGuideCombo) |
+                                    X_INPUT_GAMEPAD_GUIDE);
+  }
+#endif
+  out_state->gamepad.buttons = buttons;
   out_state->gamepad.left_trigger = native_state.state.Gamepad.bLeftTrigger;
   out_state->gamepad.right_trigger = native_state.state.Gamepad.bRightTrigger;
   out_state->gamepad.thumb_lx = native_state.state.Gamepad.sThumbLX;

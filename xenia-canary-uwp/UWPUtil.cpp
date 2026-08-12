@@ -10,6 +10,7 @@
 #include "xenia/vfs/file.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 
@@ -284,6 +285,454 @@ static int ExtractZipFromMemory(const uint8_t* data, size_t data_size,
   }
 
   return extracted;
+}
+
+struct ContentZipEntry {
+  std::string name;
+  uint16_t flags = 0;
+  uint16_t compression = 0;
+  uint32_t compressed_size = 0;
+  uint32_t uncompressed_size = 0;
+  uint32_t local_header_offset = 0;
+  bool is_directory = false;
+};
+
+static uint16_t ReadZipU16(const uint8_t* data) {
+  return static_cast<uint16_t>(data[0]) |
+         (static_cast<uint16_t>(data[1]) << 8);
+}
+
+static uint32_t ReadZipU32(const uint8_t* data) {
+  return static_cast<uint32_t>(data[0]) |
+         (static_cast<uint32_t>(data[1]) << 8) |
+         (static_cast<uint32_t>(data[2]) << 16) |
+         (static_cast<uint32_t>(data[3]) << 24);
+}
+
+static bool IsEightHexDigits(const std::string& value) {
+  if (value.size() != 8) {
+    return false;
+  }
+  return std::all_of(value.begin(), value.end(), [](unsigned char c) {
+    return std::isxdigit(c) != 0;
+  });
+}
+
+static std::string UpperAscii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  return value;
+}
+
+static std::vector<std::string> SplitContentZipPath(std::string path) {
+  std::replace(path.begin(), path.end(), '\\', '/');
+  std::vector<std::string> parts;
+  size_t start = 0;
+  while (start < path.size()) {
+    size_t slash = path.find('/', start);
+    size_t end = slash == std::string::npos ? path.size() : slash;
+    if (end > start) {
+      parts.emplace_back(path.substr(start, end - start));
+    }
+    if (slash == std::string::npos) {
+      break;
+    }
+    start = slash + 1;
+  }
+  return parts;
+}
+
+static bool ExtractContentZipFile(std::ifstream& zip,
+                                  const ContentZipEntry& entry,
+                                  const std::filesystem::path& output_path,
+                                  std::string* out_error) {
+  std::array<uint8_t, 30> local_header{};
+  zip.clear();
+  zip.seekg(static_cast<std::streamoff>(entry.local_header_offset),
+            std::ios::beg);
+  zip.read(reinterpret_cast<char*>(local_header.data()), local_header.size());
+  if (zip.gcount() != static_cast<std::streamsize>(local_header.size()) ||
+      ReadZipU32(local_header.data()) != 0x04034B50) {
+    if (out_error) {
+      *out_error = "ZIP contains an invalid local file header.";
+    }
+    return false;
+  }
+
+  const uint16_t local_name_length = ReadZipU16(local_header.data() + 26);
+  const uint16_t local_extra_length = ReadZipU16(local_header.data() + 28);
+  const uint64_t data_offset =
+      static_cast<uint64_t>(entry.local_header_offset) + 30ull +
+      local_name_length + local_extra_length;
+
+  std::error_code ec;
+  std::filesystem::create_directories(output_path.parent_path(), ec);
+  if (ec) {
+    if (out_error) {
+      *out_error = "Could not create the temporary content import directory.";
+    }
+    return false;
+  }
+
+  std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
+  if (!output.is_open()) {
+    if (out_error) {
+      *out_error = "Could not create a file while extracting the content ZIP.";
+    }
+    return false;
+  }
+
+  zip.clear();
+  zip.seekg(static_cast<std::streamoff>(data_offset), std::ios::beg);
+
+  constexpr size_t kZipIoBufferSize = 256 * 1024;
+  std::vector<uint8_t> input_buffer(kZipIoBufferSize);
+  std::vector<uint8_t> output_buffer(kZipIoBufferSize);
+  uint64_t compressed_remaining = entry.compressed_size;
+  uint64_t total_written = 0;
+  bool success = true;
+
+  if (entry.compression == 0) {
+    while (compressed_remaining) {
+      const size_t chunk = static_cast<size_t>(std::min<uint64_t>(
+          compressed_remaining, input_buffer.size()));
+      zip.read(reinterpret_cast<char*>(input_buffer.data()), chunk);
+      if (zip.gcount() != static_cast<std::streamsize>(chunk)) {
+        success = false;
+        break;
+      }
+      output.write(reinterpret_cast<const char*>(input_buffer.data()), chunk);
+      if (!output.good()) {
+        success = false;
+        break;
+      }
+      compressed_remaining -= chunk;
+      total_written += chunk;
+    }
+  } else if (entry.compression == 8) {
+    zng_stream stream{};
+    if (zng_inflateInit2(&stream, -MAX_WBITS) != Z_OK) {
+      success = false;
+    } else {
+      int inflate_result = Z_OK;
+      while (success && compressed_remaining &&
+             inflate_result != Z_STREAM_END) {
+        const size_t chunk = static_cast<size_t>(std::min<uint64_t>(
+            compressed_remaining, input_buffer.size()));
+        zip.read(reinterpret_cast<char*>(input_buffer.data()), chunk);
+        if (zip.gcount() != static_cast<std::streamsize>(chunk)) {
+          success = false;
+          break;
+        }
+        compressed_remaining -= chunk;
+        stream.next_in = input_buffer.data();
+        stream.avail_in = static_cast<uint32_t>(chunk);
+
+        do {
+          stream.next_out = output_buffer.data();
+          stream.avail_out = static_cast<uint32_t>(output_buffer.size());
+          inflate_result = zng_inflate(&stream, Z_NO_FLUSH);
+          if (inflate_result != Z_OK && inflate_result != Z_STREAM_END) {
+            success = false;
+            break;
+          }
+          const size_t produced = output_buffer.size() - stream.avail_out;
+          if (produced) {
+            output.write(reinterpret_cast<const char*>(output_buffer.data()),
+                         produced);
+            if (!output.good()) {
+              success = false;
+              break;
+            }
+            total_written += produced;
+          }
+        } while (stream.avail_in && inflate_result != Z_STREAM_END);
+      }
+
+      if (success && inflate_result != Z_STREAM_END) {
+        success = false;
+      }
+      zng_inflateEnd(&stream);
+    }
+  } else {
+    success = false;
+    if (out_error) {
+      *out_error = "ZIP uses an unsupported compression method.";
+    }
+  }
+
+  output.close();
+  if (success && total_written != entry.uncompressed_size) {
+    success = false;
+  }
+
+  if (!success) {
+    std::error_code remove_ec;
+    std::filesystem::remove(output_path, remove_ec);
+    if (out_error && out_error->empty()) {
+      *out_error = "Failed while extracting a file from the content ZIP.";
+    }
+  }
+  return success;
+}
+
+bool UWP::ExtractContentPackageZip(const std::string& zip_path,
+                                   const std::string& dest_folder,
+                                   std::vector<std::string>* out_files,
+                                   std::string* out_error) {
+  if (out_files) {
+    out_files->clear();
+  }
+  if (out_error) {
+    out_error->clear();
+  }
+
+  std::ifstream zip(zip_path, std::ios::binary);
+  if (!zip.is_open()) {
+    if (out_error) {
+      *out_error = "Could not open the selected ZIP file.";
+    }
+    return false;
+  }
+
+  zip.seekg(0, std::ios::end);
+  const std::streamoff archive_size = zip.tellg();
+  if (archive_size < 22) {
+    if (out_error) {
+      *out_error = "The selected file is not a valid ZIP archive.";
+    }
+    return false;
+  }
+
+  const size_t tail_size = static_cast<size_t>(std::min<std::streamoff>(
+      archive_size, static_cast<std::streamoff>(0xFFFF + 22)));
+  std::vector<uint8_t> tail(tail_size);
+  zip.seekg(archive_size - static_cast<std::streamoff>(tail_size),
+            std::ios::beg);
+  zip.read(reinterpret_cast<char*>(tail.data()), tail.size());
+  if (zip.gcount() != static_cast<std::streamsize>(tail.size())) {
+    if (out_error) {
+      *out_error = "Failed to read the selected ZIP archive.";
+    }
+    return false;
+  }
+
+  size_t eocd_offset = std::string::npos;
+  for (size_t i = tail.size() - 22;; --i) {
+    if (ReadZipU32(tail.data() + i) == 0x06054B50) {
+      const uint16_t comment_length = ReadZipU16(tail.data() + i + 20);
+      if (i + 22 + comment_length == tail.size()) {
+        eocd_offset = i;
+        break;
+      }
+    }
+    if (i == 0) {
+      break;
+    }
+  }
+
+  if (eocd_offset == std::string::npos) {
+    if (out_error) {
+      *out_error = "Could not find the ZIP central directory.";
+    }
+    return false;
+  }
+
+  const uint16_t disk_number = ReadZipU16(tail.data() + eocd_offset + 4);
+  const uint16_t central_disk = ReadZipU16(tail.data() + eocd_offset + 6);
+  const uint16_t entries_on_disk = ReadZipU16(tail.data() + eocd_offset + 8);
+  const uint16_t entry_count = ReadZipU16(tail.data() + eocd_offset + 10);
+  const uint32_t central_size = ReadZipU32(tail.data() + eocd_offset + 12);
+  const uint32_t central_offset = ReadZipU32(tail.data() + eocd_offset + 16);
+
+  if (disk_number != 0 || central_disk != 0 || entries_on_disk != entry_count ||
+      entry_count == 0xFFFF || central_size == 0xFFFFFFFF ||
+      central_offset == 0xFFFFFFFF ||
+      static_cast<uint64_t>(central_offset) + central_size >
+          static_cast<uint64_t>(archive_size)) {
+    if (out_error) {
+      *out_error = "Multi-disk and ZIP64 content archives are not supported.";
+    }
+    return false;
+  }
+
+  std::vector<ContentZipEntry> entries;
+  entries.reserve(entry_count);
+  zip.clear();
+  zip.seekg(static_cast<std::streamoff>(central_offset), std::ios::beg);
+
+  for (uint16_t index = 0; index < entry_count; ++index) {
+    std::array<uint8_t, 46> header{};
+    zip.read(reinterpret_cast<char*>(header.data()), header.size());
+    if (zip.gcount() != static_cast<std::streamsize>(header.size()) ||
+        ReadZipU32(header.data()) != 0x02014B50) {
+      if (out_error) {
+        *out_error = "ZIP central directory is malformed.";
+      }
+      return false;
+    }
+
+    const uint16_t name_length = ReadZipU16(header.data() + 28);
+    const uint16_t extra_length = ReadZipU16(header.data() + 30);
+    const uint16_t comment_length = ReadZipU16(header.data() + 32);
+    const uint16_t start_disk = ReadZipU16(header.data() + 34);
+    if (start_disk != 0) {
+      if (out_error) {
+        *out_error = "Multi-disk ZIP archives are not supported.";
+      }
+      return false;
+    }
+
+    ContentZipEntry entry;
+    entry.flags = ReadZipU16(header.data() + 8);
+    entry.compression = ReadZipU16(header.data() + 10);
+    entry.compressed_size = ReadZipU32(header.data() + 20);
+    entry.uncompressed_size = ReadZipU32(header.data() + 24);
+    entry.local_header_offset = ReadZipU32(header.data() + 42);
+
+    entry.name.resize(name_length);
+    if (name_length) {
+      zip.read(entry.name.data(), name_length);
+      if (zip.gcount() != static_cast<std::streamsize>(name_length)) {
+        if (out_error) {
+          *out_error = "Failed to read a ZIP entry name.";
+        }
+        return false;
+      }
+    }
+    entry.is_directory = !entry.name.empty() &&
+                         (entry.name.back() == '/' || entry.name.back() == '\\');
+
+    zip.seekg(static_cast<std::streamoff>(extra_length) + comment_length,
+              std::ios::cur);
+    if (!zip.good()) {
+      if (out_error) {
+        *out_error = "Failed while reading the ZIP central directory.";
+      }
+      return false;
+    }
+    entries.push_back(std::move(entry));
+  }
+
+  std::filesystem::path destination_root = dest_folder;
+  std::error_code create_ec;
+  std::filesystem::create_directories(destination_root, create_ec);
+  if (create_ec) {
+    if (out_error) {
+      *out_error = "Could not create the content ZIP staging directory.";
+    }
+    return false;
+  }
+
+  int extracted_files = 0;
+  for (const auto& entry : entries) {
+    std::string normalized_name = entry.name;
+    std::replace(normalized_name.begin(), normalized_name.end(), '\\', '/');
+    if (normalized_name.empty() || normalized_name.front() == '/' ||
+        normalized_name.find(':') != std::string::npos) {
+      if (out_error) {
+        *out_error = "ZIP contains an unsafe path.";
+      }
+      return false;
+    }
+
+    auto parts = SplitContentZipPath(normalized_name);
+    if (parts.empty()) {
+      continue;
+    }
+    if (parts.front() == "__MACOSX" || parts.front() == ".DS_Store") {
+      continue;
+    }
+    for (const auto& part : parts) {
+      if (part == "." || part == ".." || part.empty()) {
+        if (out_error) {
+          *out_error = "ZIP contains an unsafe relative path.";
+        }
+        return false;
+      }
+    }
+
+    if (!IsEightHexDigits(parts[0])) {
+      if (out_error) {
+        *out_error =
+            "ZIP root must be an 8-digit Xbox 360 title ID, such as 415608C3.";
+      }
+      return false;
+    }
+    parts[0] = UpperAscii(parts[0]);
+
+    if (parts.size() >= 2) {
+      if (!IsEightHexDigits(parts[1])) {
+        if (out_error) {
+          *out_error = "The folder below the title ID must be an 8-digit content type.";
+        }
+        return false;
+      }
+      parts[1] = UpperAscii(parts[1]);
+      if (parts[1] != "00000002" && parts[1] != "000B0000") {
+        if (out_error) {
+          *out_error =
+              "This importer accepts DLC (00000002) and title updates (000B0000).";
+        }
+        return false;
+      }
+    }
+
+    if (!entry.is_directory && parts.size() < 3) {
+      if (out_error) {
+        *out_error =
+            "Content files must be inside <TitleID>/<ContentType>/ in the ZIP.";
+      }
+      return false;
+    }
+
+    std::filesystem::path output_path = destination_root;
+    for (const auto& part : parts) {
+      output_path /= xe::to_path(part);
+    }
+
+    if (entry.is_directory) {
+      std::error_code dir_ec;
+      std::filesystem::create_directories(output_path, dir_ec);
+      if (dir_ec) {
+        if (out_error) {
+          *out_error = "Could not create a directory while extracting the ZIP.";
+        }
+        return false;
+      }
+      continue;
+    }
+
+    if ((entry.flags & 0x0001) != 0) {
+      if (out_error) {
+        *out_error = "Encrypted ZIP entries are not supported.";
+      }
+      return false;
+    }
+    if (entry.compression != 0 && entry.compression != 8) {
+      if (out_error) {
+        *out_error = "ZIP entries must use Store or Deflate compression.";
+      }
+      return false;
+    }
+
+    if (!ExtractContentZipFile(zip, entry, output_path, out_error)) {
+      return false;
+    }
+    if (out_files) {
+      out_files->push_back(xe::path_to_utf8(output_path));
+    }
+    ++extracted_files;
+  }
+
+  if (!extracted_files) {
+    if (out_error) {
+      *out_error = "No DLC or title update packages were found in the ZIP.";
+    }
+    return false;
+  }
+
+  return true;
 }
 
 winrt::fire_and_forget DownloadAndExtractZipAsync(

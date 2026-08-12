@@ -313,30 +313,47 @@ void ProfileManager::Login(const uint64_t xuid, const uint8_t user_index,
   XELOGI("Loaded {} (GUID: {:016X}) to slot {}", profile.GetGamertagString(),
          xuid, assigned_user_slot);
 
-  MountProfile(xuid);
+  XELOGI("Profile login {:016X}: mounting profile", xuid);
+  if (!MountProfile(xuid)) {
+    XELOGE("Profile login {:016X}: mount failed", xuid);
+    return;
+  }
 
+  XELOGI("Profile login {:016X}: constructing UserProfile", xuid);
   logged_profiles_[assigned_user_slot] =
       std::make_unique<UserProfile>(xuid, &profile);
+  XELOGI("Profile login {:016X}: UserProfile constructed", xuid);
 
+  XELOGI("Profile login {:016X}: adding user tracker entry", xuid);
   user_tracker_->AddUser(xuid);
+  XELOGI("Profile login {:016X}: user tracker complete", xuid);
 
   if (notify) {
+    XELOGI("Profile login {:016X}: broadcasting sign-in notification", xuid);
     kernel_state_->BroadcastNotification(kXNotificationSystemSignInChanged,
                                          GetUsedUserSlots().to_ulong());
+    XELOGI("Profile login {:016X}: sign-in notification complete", xuid);
   }
+
+  XELOGI("Profile login {:016X}: updating profile config", xuid);
   UpdateConfig(xuid, assigned_user_slot);
+  XELOGI("Profile login {:016X}: profile config updated", xuid);
 
   if (kernel_state_->GetXboxLiveAPI()->IsConnectedToServer()) {
     // TODO(Adrian):
     // Netplay doesn't support multiple local profiles too well.
     // Only register user index 0 on backend for now to reduce issues.
     if (assigned_user_slot == 0) {
+      XELOGI("Profile login {:016X}: registering netplay player", xuid);
       std::unique_ptr<HTTPResponseObjectJSON> reg_result =
           kernel_state_->GetXboxLiveAPI()->RegisterPlayer(xuid);
+      XELOGI("Profile login {:016X}: netplay registration returned", xuid);
     }
   }
 
+  XELOGI("Profile login {:016X}: loading friends", xuid);
   logged_profiles_[assigned_user_slot]->LoadFriends();
+  XELOGI("Profile login {:016X}: login complete", xuid);
 }
 
 void ProfileManager::Logout(const uint8_t user_index, bool notify) {

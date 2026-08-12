@@ -53,6 +53,10 @@ void LaunchUri(const std::string& url);
 void DownloadAndExtractZip(const std::string& url,
                            const std::string& dest_folder,
                            std::function<void(bool, std::string)> callback);
+bool ExtractContentPackageZip(const std::string& zip_path,
+                              const std::string& dest_folder,
+                              std::vector<std::string>* out_files,
+                              std::string* out_error);
 bool IsDownloadInProgress();
 float GetDownloadProgress();
 std::string GetTitleIdFromPath(const std::string& game_path);

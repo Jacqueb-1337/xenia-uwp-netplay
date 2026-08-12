@@ -172,9 +172,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
         UWP::HandleCharacter(e.KeyCode());
     }
 
+    void OnKeyDown(
+        winrt::Windows::UI::Core::CoreWindow const& /* sender */,
+        winrt::Windows::UI::Core::KeyEventArgs const& e) {
+      if (UWP::IsTextInputActive() &&
+          e.VirtualKey() == winrt::Windows::System::VirtualKey::Back) {
+        UWP::HandleBackspace();
+        e.Handled(true);
+      }
+    }
+
     void SetWindow(CoreWindow const & window)
     {
         window.CharacterReceived({this, &App::OnCharacterReceived});
+        window.KeyDown({this, &App::OnKeyDown});
     }
 };
 
