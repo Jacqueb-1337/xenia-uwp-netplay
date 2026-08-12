@@ -5896,7 +5896,9 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                                     ImGuiTableColumnFlags_WidthStretch, 1.0f);
 
             ImGui::TableNextColumn();
-            ImGui::TextWrapped("Available settings");
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(nxe::Palette::kTextMuted));
+            ImGui::TextUnformatted("SETTINGS");
+            ImGui::PopStyleColor();
             bool settings_list_has_focus = false;
             bool settings_left_focus_detected = false;
             const bool disable_left_nav = settings_focus_on_right;
@@ -5935,20 +5937,20 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               ImDrawList* settings_draw_list = ImGui::GetWindowDrawList();
               const ImVec2 item_min = ImGui::GetItemRectMin();
               const ImVec2 item_max = ImGui::GetItemRectMax();
+              const bool settings_item_highlighted =
+                  (settings_item_selected && !settings_focus_on_right) ||
+                  ImGui::IsItemFocused() || ImGui::IsItemHovered();
+              nxe::DrawGlassPanel(settings_draw_list, item_min, item_max,
+                                  4.0f * display_scale,
+                                  settings_item_highlighted);
               if (settings_item_selected) {
-                const float border_thickness =
-                    std::max(1.0f, 2.0f * display_scale);
-                const ImVec2 border_inset(border_thickness * 0.5f,
-                                          border_thickness * 0.5f);
-                MarkConfiguredTextBegin(settings_draw_list);
-                settings_draw_list->AddRect(
-                    ImVec2(item_min.x + border_inset.x,
-                           item_min.y + border_inset.y),
-                    ImVec2(item_max.x - border_inset.x,
-                           item_max.y - border_inset.y),
+                settings_draw_list->AddRectFilled(
+                    ImVec2(item_min.x + 2.0f * display_scale,
+                           item_min.y + 5.0f * display_scale),
+                    ImVec2(item_min.x + 6.0f * display_scale,
+                           item_max.y - 5.0f * display_scale),
                     ImGui::GetColorU32(settings_border_selected),
-                    8.0f * display_scale, 0, border_thickness);
-                MarkConfiguredTextEnd(settings_draw_list);
+                    2.0f * display_scale);
               }
               const float text_y = item_min.y +
                                    (settings_list_item_height -
@@ -6017,11 +6019,12 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
             const float settings_item_width =
                 std::max(220.0f, ImGui::GetContentRegionAvail().x * 0.34f);
             ImGui::PushItemWidth(settings_item_width);
+            nxe::PushSettingsContentStyle(display_scale);
 
         if (settings_selected_section == 0) {
           auto c_apply_patches = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("apply_patches")->second);
-          if (ImGui::Checkbox("Apply Patches", c_apply_patches->current_value())) {
+          if (nxe::ToggleRow("Apply Patches", c_apply_patches->current_value())) {
             c_apply_patches->SetConfigValue(
                 !c_apply_patches->GetTypedConfigValue());
             config::SaveConfig();
@@ -6033,7 +6036,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_controller_hotkeys = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("controller_hotkeys")->second);
-          if (ImGui::Checkbox("Controller Hotkeys",
+          if (nxe::ToggleRow("Controller Hotkeys",
                               c_controller_hotkeys->current_value())) {
             c_controller_hotkeys->SetConfigValue(
                 !c_controller_hotkeys->GetTypedConfigValue());
@@ -6138,7 +6141,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               cvar::ConfigVars
                   ->find("d3d12_allow_variable_refresh_rate_and_tearing")
                   ->second);
-          if (ImGui::Checkbox("Allow Variable Refresh Rate/Tearing",
+          if (nxe::ToggleRow("Allow Variable Refresh Rate/Tearing",
                               c_allow_vrr_tearing->current_value())) {
             c_allow_vrr_tearing->SetConfigValue(
                 !c_allow_vrr_tearing->GetTypedConfigValue());
@@ -6151,7 +6154,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_clear_memory_page = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("clear_memory_page_state")->second);
-          if (ImGui::Checkbox("Clear Memory Page State",
+          if (nxe::ToggleRow("Clear Memory Page State",
                               c_clear_memory_page->current_value())) {
             c_clear_memory_page->SetConfigValue(
                 !c_clear_memory_page->GetTypedConfigValue());
@@ -6199,7 +6202,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_d3d12_bindless = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("d3d12_bindless")->second);
-          if (ImGui::Checkbox("Enable D3D12 Bindless",
+          if (nxe::ToggleRow("Enable D3D12 Bindless",
                               c_d3d12_bindless->current_value())) {
             c_d3d12_bindless->SetConfigValue(
                 !c_d3d12_bindless->GetTypedConfigValue());
@@ -6214,7 +6217,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               dynamic_cast<cvar::ConfigVar<bool>*>(
                   cvar::ConfigVars->find("d3d12_submit_on_primary_buffer_end")
                       ->second);
-          if (ImGui::Checkbox("Submit On Primary Buffer End",
+          if (nxe::ToggleRow("Submit On Primary Buffer End",
                               c_d3d12_submit_on_primary_buffer_end
                                   ->current_value())) {
             c_d3d12_submit_on_primary_buffer_end->SetConfigValue(
@@ -6230,7 +6233,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               dynamic_cast<cvar::ConfigVar<bool>*>(
                   cvar::ConfigVars->find("d3d12_enable_tiled_shared_memory")
                       ->second);
-          if (ImGui::Checkbox(
+          if (nxe::ToggleRow(
                   "Enable D3D12 Tiled Shared Memory (On Xbox keep\nOFF otherwise games will crash)",
                   c_d3d12_enable_tiled_shared_memory->current_value())) {
             c_d3d12_enable_tiled_shared_memory->SetConfigValue(
@@ -6417,7 +6420,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_present_letterbox = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("present_letterbox")->second);
-          if (ImGui::Checkbox("Letterbox Presentation",
+          if (nxe::ToggleRow("Letterbox Presentation",
                               c_present_letterbox->current_value())) {
             c_present_letterbox->SetConfigValue(
                 !c_present_letterbox->GetTypedConfigValue());
@@ -6457,7 +6460,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           auto c_present_render_pass_clear =
               dynamic_cast<cvar::ConfigVar<bool>*>(
                   cvar::ConfigVars->find("present_render_pass_clear")->second);
-          if (ImGui::Checkbox("Use Presentation Render-Pass Clear",
+          if (nxe::ToggleRow("Use Presentation Render-Pass Clear",
                               c_present_render_pass_clear->current_value())) {
             c_present_render_pass_clear->SetConfigValue(
                 !c_present_render_pass_clear->GetTypedConfigValue());
@@ -6472,7 +6475,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               dynamic_cast<cvar::ConfigVar<bool>*>(
                   cvar::ConfigVars->find("host_present_from_non_ui_thread")
                       ->second);
-          if (ImGui::Checkbox("Host Present From Non-UI Thread",
+          if (nxe::ToggleRow("Host Present From Non-UI Thread",
                               c_host_present_from_non_ui_thread
                                   ->current_value())) {
             c_host_present_from_non_ui_thread->SetConfigValue(
@@ -6486,7 +6489,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_post_dither = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("postprocess_dither")->second);
-          if (ImGui::Checkbox("Postprocess Dither",
+          if (nxe::ToggleRow("Postprocess Dither",
                               c_post_dither->current_value())) {
             c_post_dither->SetConfigValue(!c_post_dither->GetTypedConfigValue());
             config::SaveConfig();
@@ -6506,7 +6509,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           auto c_allow_invalid = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("gpu_allow_invalid_fetch_constants")
                   ->second);
-          if (ImGui::Checkbox("Allow Invalid Fetch Constants",
+          if (nxe::ToggleRow("Allow Invalid Fetch Constants",
                               c_allow_invalid->current_value())) {
             c_allow_invalid->SetConfigValue(
                 !c_allow_invalid->GetTypedConfigValue());
@@ -6519,7 +6522,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_dxbc_switch = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("dxbc_switch")->second);
-          if (ImGui::Checkbox("DXBC Switch", c_dxbc_switch->current_value())) {
+          if (nxe::ToggleRow("DXBC Switch", c_dxbc_switch->current_value())) {
             c_dxbc_switch->SetConfigValue(
                 !c_dxbc_switch->GetTypedConfigValue());
             config::SaveConfig();
@@ -6531,7 +6534,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c2xmsaa = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("native_2x_msaa")->second);
-          if (ImGui::Checkbox("Native 2X MSAA", c2xmsaa->current_value())) {
+          if (nxe::ToggleRow("Native 2X MSAA", c2xmsaa->current_value())) {
             c2xmsaa->SetConfigValue(!c2xmsaa->GetTypedConfigValue());
             config::SaveConfig();
           }
@@ -6542,7 +6545,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_vsync = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("vsync")->second);
-          if (ImGui::Checkbox("V-Sync", c_vsync->current_value())) {
+          if (nxe::ToggleRow("V-Sync", c_vsync->current_value())) {
             c_vsync->SetConfigValue(!c_vsync->GetTypedConfigValue());
             config::SaveConfig();
           }
@@ -6571,7 +6574,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                   cvar::ConfigVars
                       ->find("draw_resolution_scaled_texture_offsets")
                       ->second);
-          if (ImGui::Checkbox("Draw Resolution Scaled Texture Offsets",
+          if (nxe::ToggleRow("Draw Resolution Scaled Texture Offsets",
                               c_draw_resolution_scaled_texture_offsets
                                   ->current_value())) {
             c_draw_resolution_scaled_texture_offsets->SetConfigValue(
@@ -6621,7 +6624,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_fuzzy_alpha = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("use_fuzzy_alpha_epsilon")->second);
-          if (ImGui::Checkbox("Use Fuzzy Alpha Epsilon",
+          if (nxe::ToggleRow("Use Fuzzy Alpha Epsilon",
                               c_fuzzy_alpha->current_value())) {
             c_fuzzy_alpha->SetConfigValue(
                 !c_fuzzy_alpha->GetTypedConfigValue());
@@ -6636,7 +6639,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               dynamic_cast<cvar::ConfigVar<bool>*>(
                   cvar::ConfigVars->find("native_stencil_value_output")
                       ->second);
-          if (ImGui::Checkbox("Native Stencil Value Output",
+          if (nxe::ToggleRow("Native Stencil Value Output",
                               c_native_stencil_value_output->current_value())) {
             c_native_stencil_value_output->SetConfigValue(
                 !c_native_stencil_value_output->GetTypedConfigValue());
@@ -6651,7 +6654,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               dynamic_cast<cvar::ConfigVar<bool>*>(
                   cvar::ConfigVars->find("snorm16_render_target_full_range")
                       ->second);
-          if (ImGui::Checkbox("SNORM16 Render Target Full Range",
+          if (nxe::ToggleRow("SNORM16 Render Target Full Range",
                               c_snorm16_render_target_full_range
                                   ->current_value())) {
             c_snorm16_render_target_full_range->SetConfigValue(
@@ -6668,7 +6671,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                   cvar::ConfigVars
                       ->find("mrt_edram_used_range_clamp_to_min")
                       ->second);
-          if (ImGui::Checkbox("MRT EDRAM Used Range Clamp To Min",
+          if (nxe::ToggleRow("MRT EDRAM Used Range Clamp To Min",
                               c_mrt_edram_used_range_clamp_to_min
                                   ->current_value())) {
             c_mrt_edram_used_range_clamp_to_min->SetConfigValue(
@@ -6682,7 +6685,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_store_shaders = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("store_shaders")->second);
-          if (ImGui::Checkbox("Store Shaders", c_store_shaders->current_value())) {
+          if (nxe::ToggleRow("Store Shaders", c_store_shaders->current_value())) {
             c_store_shaders->SetConfigValue(
                 !c_store_shaders->GetTypedConfigValue());
             config::SaveConfig();
@@ -6782,7 +6785,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_mute = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("mute")->second);
-          if (ImGui::Checkbox("Mute Audio", c_mute->current_value())) {
+          if (nxe::ToggleRow("Mute Audio", c_mute->current_value())) {
             c_mute->SetConfigValue(!c_mute->GetTypedConfigValue());
             config::SaveConfig();
           }
@@ -6796,7 +6799,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           auto c_ignore_offset = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("ignore_offset_for_ranged_allocations")
                   ->second);
-          if (ImGui::Checkbox("Ignore Offset",
+          if (nxe::ToggleRow("Ignore Offset",
                               c_ignore_offset->current_value())) {
             c_ignore_offset->SetConfigValue(
                 !c_ignore_offset->GetTypedConfigValue());
@@ -6809,7 +6812,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_protect_on_release = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("protect_on_release")->second);
-          if (ImGui::Checkbox("Protect On Release",
+          if (nxe::ToggleRow("Protect On Release",
                               c_protect_on_release->current_value())) {
             c_protect_on_release->SetConfigValue(
                 !c_protect_on_release->GetTypedConfigValue());
@@ -6822,7 +6825,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_protect_zero = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("protect_zero")->second);
-          if (ImGui::Checkbox("Protect Zero",
+          if (nxe::ToggleRow("Protect Zero",
                               c_protect_zero->current_value())) {
             c_protect_zero->SetConfigValue(
                 !c_protect_zero->GetTypedConfigValue());
@@ -6835,7 +6838,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_scribble_heap = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("scribble_heap")->second);
-          if (ImGui::Checkbox("Scribble Heap",
+          if (nxe::ToggleRow("Scribble Heap",
                               c_scribble_heap->current_value())) {
             c_scribble_heap->SetConfigValue(
                 !c_scribble_heap->GetTypedConfigValue());
@@ -6850,7 +6853,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
         if (settings_selected_section == 6) {
           auto c_mount_cache = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("mount_cache")->second);
-          if (ImGui::Checkbox("Mount Cache", c_mount_cache->current_value())) {
+          if (nxe::ToggleRow("Mount Cache", c_mount_cache->current_value())) {
             c_mount_cache->SetConfigValue(
                 !c_mount_cache->GetTypedConfigValue());
             config::SaveConfig();
@@ -6862,7 +6865,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_mount_scratch = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("mount_scratch")->second);
-          if (ImGui::Checkbox("Mount Scratch",
+          if (nxe::ToggleRow("Mount Scratch",
                               c_mount_scratch->current_value())) {
             c_mount_scratch->SetConfigValue(
                 !c_mount_scratch->GetTypedConfigValue());
@@ -6875,7 +6878,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_mount_memory_unit = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("mount_memory_unit")->second);
-          if (ImGui::Checkbox("Mount Memory Unit",
+          if (nxe::ToggleRow("Mount Memory Unit",
                               c_mount_memory_unit->current_value())) {
             c_mount_memory_unit->SetConfigValue(
                 !c_mount_memory_unit->GetTypedConfigValue());
@@ -7274,7 +7277,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           // Dynamic game backgrounds toggle
           auto c_dynamic_bg = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("ui_enable_dynamic_game_backgrounds")->second);
-          if (ImGui::Checkbox("Enable Dynamic Game Backgrounds", 
+          if (nxe::ToggleRow("Enable Dynamic Game Backgrounds", 
                               c_dynamic_bg->current_value())) {
             c_dynamic_bg->SetConfigValue(!c_dynamic_bg->GetTypedConfigValue());
             config::SaveConfig();
@@ -7286,7 +7289,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           // Hide tabs text toggle
           auto c_hide_tabs = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("ui_hide_tabs_text")->second);
-          if (ImGui::Checkbox("Hide Tabs Text", 
+          if (nxe::ToggleRow("Hide Tabs Text", 
                               c_hide_tabs->current_value())) {
             c_hide_tabs->SetConfigValue(!c_hide_tabs->GetTypedConfigValue());
             config::SaveConfig();
@@ -7443,7 +7446,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           auto c_host_guest_stacksync = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("enable_host_guest_stack_synchronization")
                   ->second);
-          if (ImGui::Checkbox("Enable Host Guest Stack Synchronization",
+          if (nxe::ToggleRow("Enable Host Guest Stack Synchronization",
                               c_host_guest_stacksync->current_value())) {
             c_host_guest_stacksync->SetConfigValue(
                 !c_host_guest_stacksync->GetTypedConfigValue());
@@ -7497,7 +7500,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
           auto c_interlaced = dynamic_cast<cvar::ConfigVar<bool>*>(
               cvar::ConfigVars->find("interlaced")->second);
-          if (ImGui::Checkbox("Interlaced Video Mode",
+          if (nxe::ToggleRow("Interlaced Video Mode",
                               c_interlaced->current_value())) {
             c_interlaced->SetConfigValue(!c_interlaced->GetTypedConfigValue());
             config::SaveConfig();
@@ -7575,7 +7578,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
             tooltip = c_right_trigger_deadzone->description();
           }
 
-          if (ImGui::Checkbox("Controller Vibration",
+          if (nxe::ToggleRow("Controller Vibration",
                               c_vibration->current_value())) {
             c_vibration->SetConfigValue(!c_vibration->GetTypedConfigValue());
             config::SaveConfig();
@@ -7612,6 +7615,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           }
         }
 
+            nxe::PopSettingsContentStyle();
             ImGui::PopItemWidth();
             ImGui::PopTextWrapPos();
             ImGui::PopStyleVar(2);
@@ -7655,6 +7659,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                                    paths_plane_origin.y + paths_plane_margin));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         if (ImGui::BeginChild("##paths_editor_plane", paths_plane_size, false)) {
+          nxe::PushSettingsContentStyle(display_scale);
           if (paths_focus_requested) {
             ImGui::SetWindowFocus();
           }
@@ -7664,13 +7669,14 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           ImGui::Dummy(ImVec2(0.0f, paths_content_offset_y));
 
           auto paths_list = UWP::GetPaths();
-          if (ImGui::BeginListBox("##folders")) {
+          if (ImGui::BeginListBox("##folders",
+                                  ImVec2(-FLT_MIN, 300.0f * display_scale))) {
             for (size_t i = 0; i < paths_list.size(); ++i) {
               if (paths_focus_requested && i == 0) {
                 ImGui::SetKeyboardFocusHere();
               }
               bool is_selected = (selected_path_ == paths_list[i]);
-              if (ImGui::Selectable(paths_list[i].c_str(), is_selected)) {
+              if (nxe::MenuRow(paths_list[i].c_str(), is_selected)) {
                 selected_path_ = paths_list[i];
               }
               if (ImGui::IsItemFocused()) {
@@ -7812,6 +7818,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           }
 
           ImGui::Unindent(paths_content_offset_x);
+          nxe::PopSettingsContentStyle();
           ImGui::EndChild();
         }
         ImGui::PopStyleVar();
@@ -7834,6 +7841,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                                    about_plane_origin.y + about_plane_margin));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         if (ImGui::BeginChild("##about_editor_plane", about_plane_size, false)) {
+          nxe::PushSettingsContentStyle(display_scale);
           if (about_focus_requested) {
             ImGui::SetWindowFocus();
           }
@@ -7841,9 +7849,9 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           ImGui::Indent(about_content_offset_x);
 
           ImGui::TextWrapped(
-              "Xenia Canary UWP NXE 1.1.8.12\n"
-              "A Unofficial fork of Xenia focusing on Xbox support and a blades "
-              "style frontend.\n");
+              "Xenia Canary UWP NXE 1.1.8.13\n"
+              "An unofficial fork of Xenia focusing on Xbox support and an "
+              "NXE-inspired frontend.\n");
 
           ImGui::Spacing();
 
@@ -7917,6 +7925,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
               "hardwork of all the Xenia Project contributers over the years\n");
 
           ImGui::Unindent(about_content_offset_x);
+          nxe::PopSettingsContentStyle();
           ImGui::EndChild();
         }
         ImGui::PopStyleVar();

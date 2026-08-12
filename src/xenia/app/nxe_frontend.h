@@ -119,6 +119,158 @@ inline void DrawGlassPanel(ImDrawList* draw_list, const ImVec2& min,
                      1.0f);
 }
 
+inline void PushSettingsContentStyle(float scale) {
+  scale = std::max(0.75f, scale);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                      ImVec2(14.0f * scale, 10.0f * scale));
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                      ImVec2(10.0f * scale, 9.0f * scale));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f * scale);
+  ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 4.0f * scale);
+
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(26, 31, 29, 235));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(61, 88, 37, 245));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(78, 122, 34, 250));
+  ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(34, 40, 37, 238));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(84, 132, 34, 248));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(103, 159, 39, 255));
+  ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(44, 52, 48, 240));
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(81, 128, 34, 248));
+  ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(104, 161, 40, 255));
+  ImGui::PushStyleColor(ImGuiCol_SliderGrab, Palette::kGreen);
+  ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, Palette::kGreenBright);
+  ImGui::PushStyleColor(ImGuiCol_CheckMark, Palette::kText);
+  ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(21, 25, 23, 252));
+  ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 255, 255, 48));
+  ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, IM_COL32(104, 161, 40, 150));
+}
+
+inline void PopSettingsContentStyle() {
+  ImGui::PopStyleColor(15);
+  ImGui::PopStyleVar(4);
+}
+
+// NXE settings don't present boolean values as tiny desktop checkboxes. They
+// are full-width focusable rows, with the value separated visually on the
+// right. Using Selectable preserves ImGui's controller navigation semantics:
+// D-pad moves focus and A activates the row.
+inline bool ToggleRow(const char* label, bool* value) {
+  if (!label || !value) {
+    return false;
+  }
+
+  const float scale = std::max(0.75f, ImGui::GetFontSize() / 18.0f);
+  const float row_height = 50.0f * scale;
+  const float rounding = 4.0f * scale;
+  const float width = std::max(180.0f * scale, ImGui::GetContentRegionAvail().x);
+
+  ImGui::PushID(label);
+  ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+  const bool activated = ImGui::Selectable(
+      "##nxe_toggle", false, ImGuiSelectableFlags_None,
+      ImVec2(width, row_height));
+  ImGui::PopStyleColor(4);
+
+  if (activated) {
+    *value = !*value;
+  }
+
+  const bool focused = ImGui::IsItemFocused();
+  const bool highlighted = focused || ImGui::IsItemHovered() ||
+                           ImGui::IsItemActive();
+  const ImVec2 row_min = ImGui::GetItemRectMin();
+  const ImVec2 row_max = ImGui::GetItemRectMax();
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+  DrawGlassPanel(draw_list, row_min, row_max, rounding, highlighted);
+
+  const float font_size = ImGui::GetFontSize();
+  const ImVec2 label_size = ImGui::CalcTextSize(label);
+  const ImVec2 label_pos(row_min.x + 15.0f * scale,
+                         row_min.y + (row_height - label_size.y) * 0.5f);
+  draw_list->AddText(ImGui::GetFont(), font_size, label_pos, Palette::kText,
+                     label);
+
+  const char* value_text = *value ? "ON" : "OFF";
+  const ImVec2 value_size = ImGui::CalcTextSize(value_text);
+  const float pill_w = 64.0f * scale;
+  const float pill_h = 28.0f * scale;
+  const ImVec2 pill_max(row_max.x - 12.0f * scale,
+                        row_min.y + (row_height + pill_h) * 0.5f);
+  const ImVec2 pill_min(pill_max.x - pill_w, pill_max.y - pill_h);
+  draw_list->AddRectFilled(
+      pill_min, pill_max,
+      *value ? IM_COL32(116, 178, 39, 245) : IM_COL32(8, 11, 10, 125),
+      pill_h * 0.48f);
+  draw_list->AddRect(pill_min, pill_max,
+                     *value ? IM_COL32(221, 244, 184, 180)
+                            : IM_COL32(255, 255, 255, 42),
+                     pill_h * 0.48f);
+  draw_list->AddText(
+      ImGui::GetFont(), font_size * 0.82f,
+      ImVec2(pill_min.x + (pill_w - value_size.x * 0.82f) * 0.5f,
+             pill_min.y + (pill_h - font_size * 0.82f) * 0.42f),
+      *value ? Palette::kText : Palette::kTextMuted, value_text);
+
+  ImGui::PopID();
+  return activated;
+}
+
+inline bool MenuRow(const char* label, bool selected = false,
+                    float height_scale = 1.0f) {
+  if (!label) {
+    return false;
+  }
+
+  const float scale = std::max(0.75f, ImGui::GetFontSize() / 18.0f);
+  const float row_height = 46.0f * scale * height_scale;
+  const float width = std::max(180.0f * scale, ImGui::GetContentRegionAvail().x);
+
+  ImGui::PushID(label);
+  ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0, 0, 0, 0));
+  ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+  const bool activated = ImGui::Selectable(
+      "##nxe_menu_row", selected, ImGuiSelectableFlags_None,
+      ImVec2(width, row_height));
+  ImGui::PopStyleColor(4);
+
+  const bool highlighted = selected || ImGui::IsItemFocused() ||
+                           ImGui::IsItemHovered() || ImGui::IsItemActive();
+  const ImVec2 row_min = ImGui::GetItemRectMin();
+  const ImVec2 row_max = ImGui::GetItemRectMax();
+  ImDrawList* draw_list = ImGui::GetWindowDrawList();
+  DrawGlassPanel(draw_list, row_min, row_max, 4.0f * scale, highlighted);
+
+  const ImVec2 text_size = ImGui::CalcTextSize(label);
+  draw_list->AddText(
+      ImGui::GetFont(), ImGui::GetFontSize(),
+      ImVec2(row_min.x + 15.0f * scale,
+             row_min.y + (row_height - text_size.y) * 0.5f),
+      Palette::kText, label);
+
+  // Small forward chevron - enough to communicate that A enters/activates
+  // without relying on dashboard artwork.
+  const float chevron_x = row_max.x - 18.0f * scale;
+  const float chevron_y = (row_min.y + row_max.y) * 0.5f;
+  const ImU32 chevron_color = highlighted ? Palette::kText
+                                          : Palette::kTextMuted;
+  draw_list->AddLine(ImVec2(chevron_x - 4.0f * scale,
+                            chevron_y - 5.0f * scale),
+                     ImVec2(chevron_x + 1.0f * scale, chevron_y),
+                     chevron_color, std::max(1.0f, 1.5f * scale));
+  draw_list->AddLine(ImVec2(chevron_x + 1.0f * scale, chevron_y),
+                     ImVec2(chevron_x - 4.0f * scale,
+                            chevron_y + 5.0f * scale),
+                     chevron_color, std::max(1.0f, 1.5f * scale));
+
+  ImGui::PopID();
+  return activated;
+}
+
 inline void DrawSectionTitle(ImDrawList* draw_list, ImFont* font,
                              float font_size, const ImVec2& pos,
                              const char* title) {
