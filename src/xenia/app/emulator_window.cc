@@ -1678,7 +1678,7 @@ EmulatorWindow::ControllerHotKey EmulatorWindow::ProcessControllerHotkey(
     // Must clear dialogs to prevent stacking
     imgui_drawer_.get()->ClearDialogs();
 
-    // Titles may contain Unicode characters such as At Worldï¿½s End
+    // Titles may contain Unicode characters such as At WorldÃ¯Â¿Â½s End
     // Must use ImGUI font that can render these Unicode characters
     std::string title_name;
 
@@ -2198,6 +2198,18 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
       page_index = (page_index + 1) % page_count;
       active_frontend_page_ = static_cast<FrontendPage>(page_index);
       XELOGI("UWP frontend page changed with RB to {}", page_index);
+    }
+
+    // In the NXE shell, B/Escape leaves a legacy page and returns to Home.
+    // Let active widgets and popups keep B for their existing cancel behavior.
+    if (active_frontend_page_ != FrontendPage::kHome &&
+        !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+        !ImGui::IsAnyItemActive() &&
+        (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+         ImGui::IsKeyPressed(ImGuiKey_Escape, false))) {
+      XELOGI("[NXE] Returning to Home from page {}",
+             static_cast<int>(active_frontend_page_));
+      active_frontend_page_ = FrontendPage::kHome;
     }
 
     auto draw_nav_button = [this, display_scale](const char* label,
@@ -3020,91 +3032,6 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
             per_game_config_popup_focus_requested_ = true;
             show_per_game_config_editor_ = true;
           };
-
-      if (home_tab_open) {
-        struct HomeSlide {
-          const char* title;
-          const char* subtitle;
-          FrontendPage target;
-        };
-        static constexpr HomeSlide kHomeSlides[] = {
-            {"Games", "Browse and launch your Xbox 360 library",
-             FrontendPage::kGameList},
-            {"Settings", "Open Xenia's existing settings",
-             FrontendPage::kSettings},
-            {"Storage", "Game paths, content and storage locations",
-             FrontendPage::kPaths},
-            {"About", "Build information and project links",
-             FrontendPage::kAbout},
-        };
-        static int home_selected_slide = 0;
-        static bool home_focus_requested = true;
-        if (!home_tab_was_open) {
-          home_focus_requested = true;
-        }
-
-        ImGui::Dummy(ImVec2(0.0f, 112.0f * display_scale));
-        const float slide_gap = 18.0f * display_scale;
-        const float slide_height = 255.0f * display_scale;
-        const float available_width = ImGui::GetContentRegionAvail().x;
-        const float slide_width =
-            std::max(170.0f * display_scale,
-                     (available_width - slide_gap * 3.0f) / 4.0f);
-
-        for (int i = 0; i < 4; ++i) {
-          ImGui::PushID(i);
-          if (i != 0) {
-            ImGui::SameLine(0.0f, slide_gap);
-          }
-          const bool selected = home_selected_slide == i;
-          if (selected && home_focus_requested) {
-            ImGui::SetKeyboardFocusHere();
-            home_focus_requested = false;
-          }
-
-          ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
-          ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
-          ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0, 0, 0, 0));
-          ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
-          const bool activated = ImGui::Selectable(
-              "##nxe_home_slide", selected, 0,
-              ImVec2(slide_width, slide_height));
-          ImGui::PopStyleColor(4);
-
-          const bool focused = ImGui::IsItemFocused();
-          const bool hovered = ImGui::IsItemHovered();
-          if (focused || hovered) {
-            home_selected_slide = i;
-          }
-          const ImVec2 slide_min = ImGui::GetItemRectMin();
-          const ImVec2 slide_max = ImGui::GetItemRectMax();
-          const bool highlighted = focused || hovered || selected;
-          nxe::DrawGlassPanel(ImGui::GetWindowDrawList(), slide_min, slide_max,
-                              5.0f * display_scale, highlighted);
-
-          const float title_size = 25.0f * display_scale;
-          const float subtitle_size = 15.0f * display_scale;
-          const ImVec2 title_pos(slide_min.x + 20.0f * display_scale,
-                                 slide_max.y - 78.0f * display_scale);
-          ImGui::GetWindowDrawList()->AddText(
-              ImGui::GetFont(), title_size, title_pos, nxe::Palette::kText,
-              kHomeSlides[i].title);
-          ImGui::GetWindowDrawList()->AddText(
-              ImGui::GetFont(), subtitle_size,
-              ImVec2(title_pos.x, title_pos.y + 35.0f * display_scale),
-              nxe::Palette::kTextMuted, kHomeSlides[i].subtitle);
-
-          if (activated ||
-              (focused &&
-               ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false))) {
-            active_frontend_page_ = kHomeSlides[i].target;
-          }
-          ImGui::PopID();
-        }
-
-        ImGui::Dummy(ImVec2(0.0f, 36.0f * display_scale));
-        ImGui::TextDisabled("Use the D-pad to choose a slide and A to open it.");
-      }
 
       if (game_list_tab_open) {
         const bool controller_x_down = ImGui::IsKeyDown(ImGuiKey_GamepadFaceLeft);
@@ -7916,7 +7843,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           ImGui::Indent(about_content_offset_x);
 
           ImGui::TextWrapped(
-              "Xenia Canary UWP NXE 1.1.8.0\n"
+              "Xenia Canary UWP NXE 1.1.8.2\n"
               "A Unofficial fork of Xenia focusing on Xbox support and a blades "
               "style frontend.\n");
 
@@ -8092,6 +8019,93 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                                  ImVec2(72.0f * ux, 77.0f * uy),
                                  IM_COL32(228, 228, 228, 255),
                                  overlay_header_text);
+
+    // NXE Home is rendered outside the legacy Blades page/table container.
+    // Its cards are only launch points into the existing frontend pages.
+    if (active_frontend_page_ == FrontendPage::kHome) {
+      struct HomeSlide {
+        const char* title;
+        const char* subtitle;
+        FrontendPage target;
+      };
+      static constexpr HomeSlide kHomeSlides[] = {
+          {"Games", "Browse and launch your Xbox 360 library",
+           FrontendPage::kGameList},
+          {"Settings", "Open Xenia's existing settings",
+           FrontendPage::kSettings},
+          {"Storage", "Game paths and content locations",
+           FrontendPage::kPaths},
+          {"About", "Build information and project links",
+           FrontendPage::kAbout},
+      };
+      static int home_selected_slide = 0;
+
+      const bool move_left =
+          ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, false) ||
+          ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false);
+      const bool move_right =
+          ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, false) ||
+          ImGui::IsKeyPressed(ImGuiKey_RightArrow, false);
+      const bool activate =
+          ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||
+          ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+      if (move_left) {
+        home_selected_slide = (home_selected_slide + 3) % 4;
+        XELOGI("[NXE] Home selection moved left to {} ({})",
+               home_selected_slide, kHomeSlides[home_selected_slide].title);
+      } else if (move_right) {
+        home_selected_slide = (home_selected_slide + 1) % 4;
+        XELOGI("[NXE] Home selection moved right to {} ({})",
+               home_selected_slide, kHomeSlides[home_selected_slide].title);
+      }
+
+      const float card_y = 146.0f * uy;
+      const float card_h = 292.0f * uy;
+      const float card_gap = 18.0f * ux;
+      const float card_start_x = 72.0f * ux;
+      const float card_w = (880.0f * ux - card_gap * 3.0f) / 4.0f;
+      bool clicked_selected = false;
+      for (int i = 0; i < 4; ++i) {
+        const ImVec2 card_min(card_start_x + i * (card_w + card_gap), card_y);
+        const ImVec2 card_max(card_min.x + card_w, card_min.y + card_h);
+        ImGui::SetCursorScreenPos(card_min);
+        ImGui::PushID(0x4E584500 + i);
+        const bool clicked =
+            ImGui::InvisibleButton("##home_slide", ImVec2(card_w, card_h));
+        if (ImGui::IsItemHovered()) {
+          home_selected_slide = i;
+        }
+        const bool selected = home_selected_slide == i;
+        nxe::DrawGlassPanel(frontend_draw_list, card_min, card_max,
+                            5.0f * display_scale, selected);
+
+        const ImU32 accent = selected ? nxe::Palette::kGreenBright
+                                      : nxe::Palette::kGreenDark;
+        frontend_draw_list->AddRectFilled(
+            ImVec2(card_min.x + 12.0f * ux, card_min.y + 12.0f * uy),
+            ImVec2(card_max.x - 12.0f * ux, card_min.y + 98.0f * uy), accent,
+            3.0f * display_scale);
+        frontend_draw_list->AddText(
+            ImGui::GetFont(), 25.0f * uy,
+            ImVec2(card_min.x + 17.0f * ux, card_max.y - 74.0f * uy),
+            nxe::Palette::kText, kHomeSlides[i].title);
+        frontend_draw_list->AddText(
+            ImGui::GetFont(), 13.0f * uy,
+            ImVec2(card_min.x + 17.0f * ux, card_max.y - 40.0f * uy),
+            nxe::Palette::kTextMuted, kHomeSlides[i].subtitle);
+        if (clicked) {
+          home_selected_slide = i;
+          clicked_selected = true;
+        }
+        ImGui::PopID();
+      }
+
+      if (activate || clicked_selected) {
+        XELOGI("[NXE] Opening home slide {} ({})", home_selected_slide,
+               kHomeSlides[home_selected_slide].title);
+        active_frontend_page_ = kHomeSlides[home_selected_slide].target;
+      }
+    }
     constexpr float kRotateClockwise90 = -3.14159265f * 0.5f;
     constexpr float kRotateCounterClockwise90 = 3.14159265f * 0.5f;
 

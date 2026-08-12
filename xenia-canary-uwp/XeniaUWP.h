@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include <string>
 #include <filesystem>
 
@@ -18,6 +20,7 @@ void StartXenia();
 void ExecutePendingFunctionsFromUIThread();
 void RegisterXeniaWindow(xe::ui::Window* window);
 void UpdateImGuiIO();
+void SetFrontendKeyboardKey(uint32_t virtual_key, bool down);
 void SetModalNavigationCapture(bool capture);
 bool IsModalNavigationCaptured();
 

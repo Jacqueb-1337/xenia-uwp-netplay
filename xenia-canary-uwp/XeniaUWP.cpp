@@ -4,6 +4,7 @@
 #include "WinRTKeyboard.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cctype>
 #include <cstdlib>
@@ -48,6 +49,17 @@ static std::vector<std::string> s_scanned_paths;
 static bool s_modal_navigation_capture = false;
 
 namespace {
+struct FrontendKeyboardState {
+  std::atomic_bool left{false};
+  std::atomic_bool right{false};
+  std::atomic_bool up{false};
+  std::atomic_bool down{false};
+  std::atomic_bool enter{false};
+  std::atomic_bool escape{false};
+};
+
+FrontendKeyboardState g_frontend_keyboard;
+
 constexpr uint64_t kAnalogNavInitialDelayMs = 275;
 constexpr uint64_t kAnalogNavRepeatIntervalMs = 115;
 
@@ -200,6 +212,36 @@ void UWP::ExecutePendingFunctionsFromUIThread() {
 
 void UWP::RegisterXeniaWindow(xe::ui::Window* window) { s_window = window; }
 
+void UWP::SetFrontendKeyboardKey(uint32_t virtual_key, bool down) {
+  std::atomic_bool* target = nullptr;
+  switch (virtual_key) {
+    case 0x25:  // VK_LEFT
+      target = &g_frontend_keyboard.left;
+      break;
+    case 0x26:  // VK_UP
+      target = &g_frontend_keyboard.up;
+      break;
+    case 0x27:  // VK_RIGHT
+      target = &g_frontend_keyboard.right;
+      break;
+    case 0x28:  // VK_DOWN
+      target = &g_frontend_keyboard.down;
+      break;
+    case 0x0D:  // VK_RETURN
+      target = &g_frontend_keyboard.enter;
+      break;
+    case 0x1B:  // VK_ESCAPE
+      target = &g_frontend_keyboard.escape;
+      break;
+    default:
+      return;
+  }
+
+  target->store(down, std::memory_order_relaxed);
+  XELOGI("[UWP] Frontend keyboard VK 0x{:02X} {}", virtual_key,
+         down ? "down" : "up");
+}
+
 void UWP::UpdateImGuiIO() {
   static bool logged_input_entry = false;
   if (!logged_input_entry) {
@@ -210,6 +252,18 @@ void UWP::UpdateImGuiIO() {
   ImGuiIO& io = ImGui::GetIO();
   io.AddKeyEvent(ImGuiKey_Backspace, false);
   io.AddKeyEvent(ImGuiKey_Enter, false);
+  io.AddKeyEvent(ImGuiKey_LeftArrow,
+                 g_frontend_keyboard.left.load(std::memory_order_relaxed));
+  io.AddKeyEvent(ImGuiKey_RightArrow,
+                 g_frontend_keyboard.right.load(std::memory_order_relaxed));
+  io.AddKeyEvent(ImGuiKey_UpArrow,
+                 g_frontend_keyboard.up.load(std::memory_order_relaxed));
+  io.AddKeyEvent(ImGuiKey_DownArrow,
+                 g_frontend_keyboard.down.load(std::memory_order_relaxed));
+  io.AddKeyEvent(ImGuiKey_Enter,
+                 g_frontend_keyboard.enter.load(std::memory_order_relaxed));
+  io.AddKeyEvent(ImGuiKey_Escape,
+                 g_frontend_keyboard.escape.load(std::memory_order_relaxed));
 
   {
     std::unique_lock lk(UWP::g_buffer_mutex);

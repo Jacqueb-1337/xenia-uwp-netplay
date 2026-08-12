@@ -175,6 +175,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
     void OnKeyDown(
         winrt::Windows::UI::Core::CoreWindow const& /* sender */,
         winrt::Windows::UI::Core::KeyEventArgs const& e) {
+      UWP::SetFrontendKeyboardKey(static_cast<uint32_t>(e.VirtualKey()), true);
       if (UWP::IsTextInputActive() &&
           e.VirtualKey() == winrt::Windows::System::VirtualKey::Back) {
         UWP::HandleBackspace();
@@ -182,10 +183,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView>
       }
     }
 
+    void OnKeyUp(
+        winrt::Windows::UI::Core::CoreWindow const& /* sender */,
+        winrt::Windows::UI::Core::KeyEventArgs const& e) {
+      UWP::SetFrontendKeyboardKey(static_cast<uint32_t>(e.VirtualKey()), false);
+    }
+
     void SetWindow(CoreWindow const & window)
     {
         window.CharacterReceived({this, &App::OnCharacterReceived});
         window.KeyDown({this, &App::OnKeyDown});
+        window.KeyUp({this, &App::OnKeyUp});
     }
 };
 
