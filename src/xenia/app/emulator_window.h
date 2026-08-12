@@ -245,7 +245,8 @@ class EmulatorWindow {
 
    private:
     enum class FrontendPage {
-      kGameList = 0,
+      kHome = 0,
+      kGameList,
       kSettings,
       kPaths,
       kAbout,
@@ -317,7 +318,7 @@ class EmulatorWindow {
     std::string selected_game_path_;
     std::string selected_game_name_;
     bool show_path_warning_ = false;
-    FrontendPage active_frontend_page_ = FrontendPage::kGameList;
+    FrontendPage active_frontend_page_ = FrontendPage::kHome;
     bool show_action_status_ = false;
     std::string action_status_;
     ActionPopupMode action_popup_mode_ = ActionPopupMode::kInfo;

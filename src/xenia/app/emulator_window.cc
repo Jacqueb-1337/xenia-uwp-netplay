@@ -32,6 +32,7 @@
 #include "third_party/stb/stb_image.h"
 
 #include "xenia/app/profile_dialogs.h"
+#include "xenia/app/nxe_frontend.h"
 #include "xenia/app/ui_text_effect_helpers.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/filesystem.h"
@@ -2174,26 +2175,15 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
     // Channel 2: Interface overlay (top layer)
     // Channel 3: UI elements
     
-    // Always draw background as base layer (bottom layer)
+    // Original, asset-free NXE-inspired stage. Dynamic game art may still be
+    // drawn above this on channel 1, while chrome is drawn on channel 2.
     frontend_splitter.SetCurrentChannel(frontend_draw_list, 0);
-    if (auto fallback_tex = GetOrCreateBackgroundFallback()) {
-      frontend_draw_list->PushClipRectFullScreen();
-      frontend_draw_list->AddImage(
-          reinterpret_cast<ImTextureID>(fallback_tex.get()), ImVec2(0, 0),
-          io.DisplaySize);
-      frontend_draw_list->PopClipRect();
-    }
-    
-    // Draw interface overlay on top if available (top layer)
+    frontend_draw_list->PushClipRectFullScreen();
+    nxe::DrawBackdrop(frontend_draw_list, io.DisplaySize);
+    frontend_draw_list->PopClipRect();
+    // Reserve channel 2 for NXE chrome, which is drawn after the page content
+    // so it stays above dynamic game art.
     frontend_splitter.SetCurrentChannel(frontend_draw_list, 2);
-    if (auto background_tex = GetOrCreateBackground()) {
-      frontend_draw_list->PushClipRectFullScreen();
-      frontend_draw_list->AddImage(
-          reinterpret_cast<ImTextureID>(background_tex.get()), ImVec2(0, 0),
-          io.DisplaySize);
-      frontend_draw_list->PopClipRect();
-    }
-    
     frontend_splitter.SetCurrentChannel(frontend_draw_list, 3);
 
     const int page_count = static_cast<int>(FrontendPage::kCount);
@@ -2283,11 +2273,14 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
       return pressed;
     };
 
-    if (ImGui::BeginTable("##frontend_blade_layout", 3,
+    if (ImGui::BeginTable("##frontend_nxe_layout", 3,
                           ImGuiTableFlags_SizingStretchProp |
                               ImGuiTableFlags_NoSavedSettings,
                           ImGui::GetContentRegionAvail())) {
-      const float rail_width = std::max(100.0f, 118.0f * display_scale);
+      // NXE uses a horizontal category strip rather than Blades side rails.
+      // Keep the table structure to preserve the existing page code, but
+      // collapse the rail columns completely.
+      const float rail_width = 1.0f * display_scale;
       ImGui::TableSetupColumn("left", ImGuiTableColumnFlags_WidthFixed,
                               rail_width);
       ImGui::TableSetupColumn("main", ImGuiTableColumnFlags_WidthStretch);
@@ -2297,8 +2290,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
       ImGui::TableNextColumn();
       if (ImGui::BeginChild("##left_rail", ImVec2(0, 0), false,
                             ImGuiWindowFlags_NoScrollbar)) {
-        draw_nav_button("##games_tab", FrontendPage::kGameList);
-        draw_nav_button("##settings_tab", FrontendPage::kSettings);
+        ImGui::Dummy(ImVec2(0.0f, 1.0f));
       }
       ImGui::EndChild();
 
@@ -2311,10 +2303,12 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                             ImGuiWindowFlags_NoScrollbar)) {
 
       
+      bool home_tab_open = active_frontend_page_ == FrontendPage::kHome;
       bool game_list_tab_open = active_frontend_page_ == FrontendPage::kGameList;
       bool settings_tab_open = active_frontend_page_ == FrontendPage::kSettings;
       bool paths_tab_open = active_frontend_page_ == FrontendPage::kPaths;
       bool about_tab_open = active_frontend_page_ == FrontendPage::kAbout;
+      static bool home_tab_was_open = false;
       static bool game_list_tab_was_open = false;
       static bool settings_tab_was_open = false;
       static bool paths_tab_was_open = false;
@@ -2345,22 +2339,25 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
         about_focus_requested = true;
       }
 
-      const char* header_text = "Select a Game";
+      const char* header_text = "Xbox Home";
       switch (active_frontend_page_) {
+        case FrontendPage::kHome:
+          header_text = "Xbox Home";
+          break;
         case FrontendPage::kGameList:
-          header_text = "Select a Game";
+          header_text = "Games Library";
           break;
         case FrontendPage::kSettings:
-          header_text = "Make some Tweaks";
+          header_text = "System Settings";
           break;
         case FrontendPage::kPaths:
-          header_text = "Choose your Path";
+          header_text = "Storage";
           break;
         case FrontendPage::kAbout:
-          header_text = "Get the Info";
+          header_text = "About Xenia";
           break;
         default:
-          header_text = "Select a Game";
+          header_text = "Xbox Home";
           break;
       }
 
@@ -3023,6 +3020,91 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
             per_game_config_popup_focus_requested_ = true;
             show_per_game_config_editor_ = true;
           };
+
+      if (home_tab_open) {
+        struct HomeSlide {
+          const char* title;
+          const char* subtitle;
+          FrontendPage target;
+        };
+        static constexpr HomeSlide kHomeSlides[] = {
+            {"Games", "Browse and launch your Xbox 360 library",
+             FrontendPage::kGameList},
+            {"Settings", "Open Xenia's existing settings",
+             FrontendPage::kSettings},
+            {"Storage", "Game paths, content and storage locations",
+             FrontendPage::kPaths},
+            {"About", "Build information and project links",
+             FrontendPage::kAbout},
+        };
+        static int home_selected_slide = 0;
+        static bool home_focus_requested = true;
+        if (!home_tab_was_open) {
+          home_focus_requested = true;
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, 112.0f * display_scale));
+        const float slide_gap = 18.0f * display_scale;
+        const float slide_height = 255.0f * display_scale;
+        const float available_width = ImGui::GetContentRegionAvail().x;
+        const float slide_width =
+            std::max(170.0f * display_scale,
+                     (available_width - slide_gap * 3.0f) / 4.0f);
+
+        for (int i = 0; i < 4; ++i) {
+          ImGui::PushID(i);
+          if (i != 0) {
+            ImGui::SameLine(0.0f, slide_gap);
+          }
+          const bool selected = home_selected_slide == i;
+          if (selected && home_focus_requested) {
+            ImGui::SetKeyboardFocusHere();
+            home_focus_requested = false;
+          }
+
+          ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+          ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
+          ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0, 0, 0, 0));
+          ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+          const bool activated = ImGui::Selectable(
+              "##nxe_home_slide", selected, 0,
+              ImVec2(slide_width, slide_height));
+          ImGui::PopStyleColor(4);
+
+          const bool focused = ImGui::IsItemFocused();
+          const bool hovered = ImGui::IsItemHovered();
+          if (focused || hovered) {
+            home_selected_slide = i;
+          }
+          const ImVec2 slide_min = ImGui::GetItemRectMin();
+          const ImVec2 slide_max = ImGui::GetItemRectMax();
+          const bool highlighted = focused || hovered || selected;
+          nxe::DrawGlassPanel(ImGui::GetWindowDrawList(), slide_min, slide_max,
+                              5.0f * display_scale, highlighted);
+
+          const float title_size = 25.0f * display_scale;
+          const float subtitle_size = 15.0f * display_scale;
+          const ImVec2 title_pos(slide_min.x + 20.0f * display_scale,
+                                 slide_max.y - 78.0f * display_scale);
+          ImGui::GetWindowDrawList()->AddText(
+              ImGui::GetFont(), title_size, title_pos, nxe::Palette::kText,
+              kHomeSlides[i].title);
+          ImGui::GetWindowDrawList()->AddText(
+              ImGui::GetFont(), subtitle_size,
+              ImVec2(title_pos.x, title_pos.y + 35.0f * display_scale),
+              nxe::Palette::kTextMuted, kHomeSlides[i].subtitle);
+
+          if (activated ||
+              (focused &&
+               ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false))) {
+            active_frontend_page_ = kHomeSlides[i].target;
+          }
+          ImGui::PopID();
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, 36.0f * display_scale));
+        ImGui::TextDisabled("Use the D-pad to choose a slide and A to open it.");
+      }
 
       if (game_list_tab_open) {
         const bool controller_x_down = ImGui::IsKeyDown(ImGuiKey_GamepadFaceLeft);
@@ -5812,6 +5894,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
         search_panel_list_focus_requested_ = false;
         search_gamepad_y_was_down_ = false;
       }
+      home_tab_was_open = home_tab_open;
       game_list_tab_was_open = game_list_tab_open;
       settings_tab_was_open = settings_tab_open;
       paths_tab_was_open = paths_tab_open;
@@ -7833,7 +7916,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           ImGui::Indent(about_content_offset_x);
 
           ImGui::TextWrapped(
-              "Xenia Canary UWP 1.1.7.23\n"
+              "Xenia Canary UWP NXE 1.1.8.0\n"
               "A Unofficial fork of Xenia focusing on Xbox support and a blades "
               "style frontend.\n");
 
@@ -7923,8 +8006,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
       ImGui::TableNextColumn();
       if (ImGui::BeginChild("##right_rail", ImVec2(0, 0), false,
                             ImGuiWindowFlags_NoScrollbar)) {
-        draw_nav_button("##paths_tab", FrontendPage::kPaths);
-        draw_nav_button("##about_tab", FrontendPage::kAbout);
+        ImGui::Dummy(ImVec2(0.0f, 1.0f));
         ImGui::Dummy(ImVec2(0.0f, 24.0f * display_scale));
       }
       ImGui::EndChild();
@@ -7961,30 +8043,53 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           ImVec2(center.x + half.x, center.y + half.y));
     };
 
-    const char* overlay_header_text = "Select a Game";
+    const char* overlay_header_text = "Xbox Home";
     switch (active_frontend_page_) {
+      case FrontendPage::kHome:
+        overlay_header_text = "Xbox Home";
+        break;
       case FrontendPage::kGameList:
-        overlay_header_text = "Select a Game";
+        overlay_header_text = "Games Library";
         break;
       case FrontendPage::kSettings:
-        overlay_header_text = "Make some Tweaks";
+        overlay_header_text = "System Settings";
         break;
       case FrontendPage::kPaths:
-        overlay_header_text = "Choose your Path";
+        overlay_header_text = "Storage";
         break;
       case FrontendPage::kAbout:
-        overlay_header_text = "Get the Info";
+        overlay_header_text = "About Xenia";
         break;
       default:
-        overlay_header_text = "Select a Game";
+        overlay_header_text = "Xbox Home";
         break;
     }
 
     frontend_draw_list->PushClipRect(ImVec2(0.0f, 0.0f), io.DisplaySize, false);
 
+    // NXE category chrome. LB/RB continues to own controller category changes;
+    // these tabs deliberately stay out of ImGui navigation so game/settings
+    // focus remains predictable on a controller.
+    nxe::DrawTopChrome(frontend_draw_list, io.DisplaySize, display_scale);
+    nxe::DrawBottomChrome(frontend_draw_list, io.DisplaySize, display_scale);
+    const char* nxe_tab_labels[5] = {"HOME", "GAMES", "SETTINGS", "STORAGE", "ABOUT"};
+    const int nxe_active_index = static_cast<int>(active_frontend_page_);
+    const float nxe_nav_y = 8.0f * uy;
+    const float nxe_nav_h = 48.0f * uy;
+    const float nxe_nav_w = 112.0f * ux;
+    const float nxe_nav_start_x = 74.0f * ux;
+    for (int i = 0; i < 5; ++i) {
+      const ImVec2 tab_min(nxe_nav_start_x + nxe_nav_w * i, nxe_nav_y);
+      const ImVec2 tab_max(tab_min.x + nxe_nav_w, nxe_nav_y + nxe_nav_h);
+      nxe::DrawNavTab(frontend_draw_list, ImGui::GetFont(), 17.0f * uy,
+                      tab_min, tab_max, nxe_tab_labels[i], i == nxe_active_index);
+    }
+    nxe::DrawProfilePill(frontend_draw_list, ImGui::GetFont(), io.DisplaySize,
+                         display_scale, "Xenia Canary");
+
     DrawTextWithConfiguredEffect(frontend_draw_list, ImGui::GetFont(),
-                                 26.0f * uy,
-                                 ImVec2(150.0f * ux, 18.0f * uy),
+                                 27.0f * uy,
+                                 ImVec2(72.0f * ux, 77.0f * uy),
                                  IM_COL32(228, 228, 228, 255),
                                  overlay_header_text);
     constexpr float kRotateClockwise90 = -3.14159265f * 0.5f;
@@ -8008,10 +8113,8 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
     const char* tab_labels[4] = {"games", "settings", "paths", "about"};
     int active_index = static_cast<int>(active_frontend_page_);
     
-    // Check if tabs text should be hidden
-    auto c_hide_tabs = dynamic_cast<cvar::ConfigVar<bool>*>(
-        cvar::ConfigVars->find("ui_hide_tabs_text")->second);
-    bool hide_tabs_text = c_hide_tabs ? c_hide_tabs->GetTypedConfigValue() : false;
+    // Blades' vertical rail labels are intentionally disabled on the NXE branch.
+    const bool hide_tabs_text = true;
     
     if (!hide_tabs_text) {
       for (int i = 0; i < 4; ++i) {
