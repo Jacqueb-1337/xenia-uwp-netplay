@@ -339,14 +339,15 @@ void ProfileManager::Login(const uint64_t xuid, const uint8_t user_index,
   UpdateConfig(xuid, assigned_user_slot);
   XELOGI("Profile login {:016X}: profile config updated", xuid);
 
-  if (kernel_state_->GetXboxLiveAPI()->IsConnectedToServer()) {
+  if (auto* xbox_live_api = kernel_state_->GetXboxLiveAPI();
+      xbox_live_api && xbox_live_api->IsConnectedToServer()) {
     // TODO(Adrian):
     // Netplay doesn't support multiple local profiles too well.
     // Only register user index 0 on backend for now to reduce issues.
     if (assigned_user_slot == 0) {
       XELOGI("Profile login {:016X}: registering netplay player", xuid);
       std::unique_ptr<HTTPResponseObjectJSON> reg_result =
-          kernel_state_->GetXboxLiveAPI()->RegisterPlayer(xuid);
+          xbox_live_api->RegisterPlayer(xuid);
       XELOGI("Profile login {:016X}: netplay registration returned", xuid);
     }
   }

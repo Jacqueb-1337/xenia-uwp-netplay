@@ -14,6 +14,8 @@
 
 #include <xinput.h>  // NOLINT(build/include_order)
 
+#include <atomic>
+
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/hid/hid_flags.h"
@@ -25,6 +27,194 @@
 namespace xe {
 namespace hid {
 namespace xinput {
+
+namespace {
+#if XE_PLATFORM_WINRT
+struct UwpSyntheticGamepadState {
+  std::atomic_bool enabled{false};
+  std::atomic<uint32_t> packet_number{1};
+  std::atomic<uint16_t> buttons{0};
+  std::atomic_bool left_trigger{false};
+  std::atomic_bool right_trigger{false};
+  std::atomic_bool left_up{false};
+  std::atomic_bool left_down{false};
+  std::atomic_bool left_left{false};
+  std::atomic_bool left_right{false};
+  std::atomic_bool right_up{false};
+  std::atomic_bool right_down{false};
+  std::atomic_bool right_left{false};
+  std::atomic_bool right_right{false};
+};
+
+UwpSyntheticGamepadState g_uwp_synthetic_gamepad;
+
+bool IsUwpSyntheticGamepadEnabled(uint32_t user_index) {
+  return user_index == 0 &&
+         g_uwp_synthetic_gamepad.enabled.load(std::memory_order_relaxed);
+}
+
+void ApplyUwpSyntheticGamepadState(X_INPUT_STATE* state) {
+  state->packet_number +=
+      g_uwp_synthetic_gamepad.packet_number.load(std::memory_order_relaxed);
+  state->gamepad.buttons |=
+      g_uwp_synthetic_gamepad.buttons.load(std::memory_order_relaxed);
+  if (g_uwp_synthetic_gamepad.left_trigger.load(std::memory_order_relaxed)) {
+    state->gamepad.left_trigger = 0xFF;
+  }
+  if (g_uwp_synthetic_gamepad.right_trigger.load(std::memory_order_relaxed)) {
+    state->gamepad.right_trigger = 0xFF;
+  }
+
+  const bool left_up =
+      g_uwp_synthetic_gamepad.left_up.load(std::memory_order_relaxed);
+  const bool left_down =
+      g_uwp_synthetic_gamepad.left_down.load(std::memory_order_relaxed);
+  const bool left_left =
+      g_uwp_synthetic_gamepad.left_left.load(std::memory_order_relaxed);
+  const bool left_right =
+      g_uwp_synthetic_gamepad.left_right.load(std::memory_order_relaxed);
+  const bool right_up =
+      g_uwp_synthetic_gamepad.right_up.load(std::memory_order_relaxed);
+  const bool right_down =
+      g_uwp_synthetic_gamepad.right_down.load(std::memory_order_relaxed);
+  const bool right_left =
+      g_uwp_synthetic_gamepad.right_left.load(std::memory_order_relaxed);
+  const bool right_right =
+      g_uwp_synthetic_gamepad.right_right.load(std::memory_order_relaxed);
+
+  if (left_up != left_down) {
+    state->gamepad.thumb_ly = left_up ? INT16_MAX : -INT16_MAX;
+  }
+  if (left_left != left_right) {
+    state->gamepad.thumb_lx = left_right ? INT16_MAX : -INT16_MAX;
+  }
+  if (right_up != right_down) {
+    state->gamepad.thumb_ry = right_up ? INT16_MAX : -INT16_MAX;
+  }
+  if (right_left != right_right) {
+    state->gamepad.thumb_rx = right_right ? INT16_MAX : -INT16_MAX;
+  }
+}
+#endif
+}  // namespace
+
+bool SetUwpSyntheticGamepadVirtualKey(uint32_t virtual_key, bool down) {
+#if XE_PLATFORM_WINRT
+  auto touch_packet = []() {
+    g_uwp_synthetic_gamepad.packet_number.fetch_add(1,
+                                                     std::memory_order_relaxed);
+  };
+  auto set_bool = [&](std::atomic_bool& value) {
+    if (value.exchange(down, std::memory_order_relaxed) != down) {
+      touch_packet();
+    }
+  };
+  auto set_button = [&](uint16_t mask) {
+    uint16_t old_value =
+        g_uwp_synthetic_gamepad.buttons.load(std::memory_order_relaxed);
+    while (true) {
+      const uint16_t new_value =
+          down ? static_cast<uint16_t>(old_value | mask)
+               : static_cast<uint16_t>(old_value & ~mask);
+      if (new_value == old_value) {
+        return;
+      }
+      if (g_uwp_synthetic_gamepad.buttons.compare_exchange_weak(
+              old_value, new_value, std::memory_order_relaxed)) {
+        touch_packet();
+        return;
+      }
+    }
+  };
+
+  bool recognized = true;
+  switch (virtual_key) {
+    case 0xC3:  // VK_GAMEPAD_A
+      set_button(XINPUT_GAMEPAD_A);
+      break;
+    case 0xC4:  // VK_GAMEPAD_B
+      set_button(XINPUT_GAMEPAD_B);
+      break;
+    case 0xC5:  // VK_GAMEPAD_X
+      set_button(XINPUT_GAMEPAD_X);
+      break;
+    case 0xC6:  // VK_GAMEPAD_Y
+      set_button(XINPUT_GAMEPAD_Y);
+      break;
+    case 0xC7:  // VK_GAMEPAD_RIGHT_SHOULDER
+      set_button(XINPUT_GAMEPAD_RIGHT_SHOULDER);
+      break;
+    case 0xC8:  // VK_GAMEPAD_LEFT_SHOULDER
+      set_button(XINPUT_GAMEPAD_LEFT_SHOULDER);
+      break;
+    case 0xC9:  // VK_GAMEPAD_LEFT_TRIGGER
+      set_bool(g_uwp_synthetic_gamepad.left_trigger);
+      break;
+    case 0xCA:  // VK_GAMEPAD_RIGHT_TRIGGER
+      set_bool(g_uwp_synthetic_gamepad.right_trigger);
+      break;
+    case 0xCB:  // VK_GAMEPAD_DPAD_UP
+      set_button(XINPUT_GAMEPAD_DPAD_UP);
+      break;
+    case 0xCC:  // VK_GAMEPAD_DPAD_DOWN
+      set_button(XINPUT_GAMEPAD_DPAD_DOWN);
+      break;
+    case 0xCD:  // VK_GAMEPAD_DPAD_LEFT
+      set_button(XINPUT_GAMEPAD_DPAD_LEFT);
+      break;
+    case 0xCE:  // VK_GAMEPAD_DPAD_RIGHT
+      set_button(XINPUT_GAMEPAD_DPAD_RIGHT);
+      break;
+    case 0xCF:  // VK_GAMEPAD_MENU
+      set_button(XINPUT_GAMEPAD_START);
+      break;
+    case 0xD0:  // VK_GAMEPAD_VIEW
+      set_button(XINPUT_GAMEPAD_BACK);
+      break;
+    case 0xD1:  // VK_GAMEPAD_LEFT_THUMBSTICK_BUTTON
+      set_button(XINPUT_GAMEPAD_LEFT_THUMB);
+      break;
+    case 0xD2:  // VK_GAMEPAD_RIGHT_THUMBSTICK_BUTTON
+      set_button(XINPUT_GAMEPAD_RIGHT_THUMB);
+      break;
+    case 0xD3:  // VK_GAMEPAD_LEFT_THUMBSTICK_UP
+      set_bool(g_uwp_synthetic_gamepad.left_up);
+      break;
+    case 0xD4:  // VK_GAMEPAD_LEFT_THUMBSTICK_DOWN
+      set_bool(g_uwp_synthetic_gamepad.left_down);
+      break;
+    case 0xD5:  // VK_GAMEPAD_LEFT_THUMBSTICK_RIGHT
+      set_bool(g_uwp_synthetic_gamepad.left_right);
+      break;
+    case 0xD6:  // VK_GAMEPAD_LEFT_THUMBSTICK_LEFT
+      set_bool(g_uwp_synthetic_gamepad.left_left);
+      break;
+    case 0xD7:  // VK_GAMEPAD_RIGHT_THUMBSTICK_UP
+      set_bool(g_uwp_synthetic_gamepad.right_up);
+      break;
+    case 0xD8:  // VK_GAMEPAD_RIGHT_THUMBSTICK_DOWN
+      set_bool(g_uwp_synthetic_gamepad.right_down);
+      break;
+    case 0xD9:  // VK_GAMEPAD_RIGHT_THUMBSTICK_RIGHT
+      set_bool(g_uwp_synthetic_gamepad.right_right);
+      break;
+    case 0xDA:  // VK_GAMEPAD_RIGHT_THUMBSTICK_LEFT
+      set_bool(g_uwp_synthetic_gamepad.right_left);
+      break;
+    default:
+      recognized = false;
+      break;
+  }
+  if (recognized) {
+    g_uwp_synthetic_gamepad.enabled.store(true, std::memory_order_relaxed);
+  }
+  return recognized;
+#else
+  (void)virtual_key;
+  (void)down;
+  return false;
+#endif
+}
 
 XInputInputDriver::XInputInputDriver(xe::ui::Window* window,
                                      size_t window_z_order)
@@ -117,20 +307,41 @@ static void set_skip(uint32_t user_index) {
 
 X_RESULT XInputInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
                                             X_INPUT_CAPABILITIES* out_caps) {
-  DWORD skipper = should_skip(user_index);
+#if XE_PLATFORM_WINRT
+  const bool synthetic = IsUwpSyntheticGamepadEnabled(user_index);
+#else
+  const bool synthetic = false;
+#endif
+  DWORD skipper = synthetic ? 0 : should_skip(user_index);
   if (skipper) {
     return skipper;
   }
-  XINPUT_CAPABILITIES native_caps;
+  XINPUT_CAPABILITIES native_caps = {};
   auto xigc = (decltype(&XInputGetCapabilities))XInputGetCapabilities_;
   DWORD result =
       xigc(user_index, flags & ~X_INPUT_DEVTYPE::XINPUT_DEVTYPE_KEYBOARD,
            &native_caps);
   if (result) {
-    if (result == ERROR_DEVICE_NOT_CONNECTED) {
-      set_skip(user_index);
+#if XE_PLATFORM_WINRT
+    if (synthetic) {
+      native_caps.Type = XINPUT_DEVTYPE_GAMEPAD;
+      native_caps.SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
+      native_caps.Gamepad.wButtons = 0xF3FF;
+      native_caps.Gamepad.bLeftTrigger = 0xFF;
+      native_caps.Gamepad.bRightTrigger = 0xFF;
+      native_caps.Gamepad.sThumbLX = INT16_MAX;
+      native_caps.Gamepad.sThumbLY = INT16_MAX;
+      native_caps.Gamepad.sThumbRX = INT16_MAX;
+      native_caps.Gamepad.sThumbRY = INT16_MAX;
+      result = ERROR_SUCCESS;
+    } else
+#endif
+    {
+      if (result == ERROR_DEVICE_NOT_CONNECTED) {
+        set_skip(user_index);
+      }
+      return result;
     }
-    return result;
   }
 
   out_caps->type = native_caps.Type;
@@ -152,23 +363,34 @@ X_RESULT XInputInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 
 X_RESULT XInputInputDriver::GetState(uint32_t user_index,
                                      X_INPUT_STATE* out_state) {
-  DWORD skipper = should_skip(user_index);
+#if XE_PLATFORM_WINRT
+  const bool synthetic = IsUwpSyntheticGamepadEnabled(user_index);
+#else
+  const bool synthetic = false;
+#endif
+  DWORD skipper = synthetic ? 0 : should_skip(user_index);
   if (skipper) {
     return skipper;
   }
 
-  // Added padding in case we are using XInputGetStateEx
+  // Added padding in case we are using XInputGetStateEx.
   struct {
     XINPUT_STATE state;
     unsigned int dwPaddingReserved;
-  } native_state;
+  } native_state = {};
 
-  // Prefer XInputGetStateEx when Guide support is requested, but Xbox UWP's
-  // xinput1_4.dll may resolve ordinal 100 while calls to it still return
-  // ERROR_PROC_NOT_FOUND. Fall back to the public XInputGetState API in that
-  // case. On WinRT the Start + View/Back combo below synthesizes Guide anyway.
   auto xigs = (decltype(&XInputGetState))XInputGetState_;
   DWORD result = ERROR_PROC_NOT_FOUND;
+#if XE_PLATFORM_WINRT
+  // Xbox UWP does not reliably support XInputGetStateEx. Always use the
+  // public XInputGetState path here. The Device Portal synthetic controller
+  // is merged below and can also provide user 0 when no physical pad exists.
+  result = xigs(user_index, &native_state.state);
+  if (result && synthetic) {
+    native_state.state = {};
+    result = ERROR_SUCCESS;
+  }
+#else
   if (cvars::guide_button && XInputGetStateEx_) {
     auto xigs_ex = (decltype(&XInputGetState))XInputGetStateEx_;
     result = xigs_ex(user_index, &native_state.state);
@@ -176,6 +398,7 @@ X_RESULT XInputInputDriver::GetState(uint32_t user_index,
   if (result == ERROR_PROC_NOT_FOUND) {
     result = xigs(user_index, &native_state.state);
   }
+#endif
   if (result) {
     if (result == ERROR_DEVICE_NOT_CONNECTED) {
       set_skip(user_index);
@@ -184,25 +407,28 @@ X_RESULT XInputInputDriver::GetState(uint32_t user_index,
   }
 
   out_state->packet_number = native_state.state.dwPacketNumber;
-  uint16_t buttons = native_state.state.Gamepad.wButtons;
-#if XE_PLATFORM_WINRT
-  // Xbox UWP can't receive the physical Xbox button through normal XInput.
-  // Treat Start + View/Back as the Xbox 360 Guide button instead. Consume the
-  // original two buttons so games don't receive Start and Back at the same
-  // time as the synthetic Guide press.
-  constexpr uint16_t kGuideCombo = XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK;
-  if ((buttons & kGuideCombo) == kGuideCombo) {
-    buttons = static_cast<uint16_t>((buttons & ~kGuideCombo) |
-                                    X_INPUT_GAMEPAD_GUIDE);
-  }
-#endif
-  out_state->gamepad.buttons = buttons;
+  out_state->gamepad.buttons = native_state.state.Gamepad.wButtons;
   out_state->gamepad.left_trigger = native_state.state.Gamepad.bLeftTrigger;
   out_state->gamepad.right_trigger = native_state.state.Gamepad.bRightTrigger;
   out_state->gamepad.thumb_lx = native_state.state.Gamepad.sThumbLX;
   out_state->gamepad.thumb_ly = native_state.state.Gamepad.sThumbLY;
   out_state->gamepad.thumb_rx = native_state.state.Gamepad.sThumbRX;
   out_state->gamepad.thumb_ry = native_state.state.Gamepad.sThumbRY;
+
+#if XE_PLATFORM_WINRT
+  if (synthetic) {
+    ApplyUwpSyntheticGamepadState(out_state);
+  }
+
+  // Xbox UWP can't receive the physical Xbox button through normal XInput.
+  // Treat Start + View/Back as the Xbox 360 Guide button instead. This also
+  // works for Device Portal's synthetic Menu + View presses.
+  constexpr uint16_t kGuideCombo = XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK;
+  if ((out_state->gamepad.buttons & kGuideCombo) == kGuideCombo) {
+    out_state->gamepad.buttons = static_cast<uint16_t>(
+        (out_state->gamepad.buttons & ~kGuideCombo) | X_INPUT_GAMEPAD_GUIDE);
+  }
+#endif
 
   return result;
 }

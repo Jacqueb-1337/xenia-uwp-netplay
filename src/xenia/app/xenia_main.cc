@@ -33,6 +33,10 @@
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/devices/host_path_device.h"
 
+#if XE_PLATFORM_WINRT
+#include "xenia-canary-uwp/XeniaUWP.h"
+#endif
+
 #if !XE_PLATFORM_WINRT
 #include "xenia/app/discord/discord_presence.h"
 #endif
@@ -551,7 +555,6 @@ bool EmulatorApp::OnInitialize() {
   // Create the emulator but don't initialize so we can setup the window.
   emulator_ =
       std::make_unique<Emulator>("", storage_root, content_root, cache_root);
-
   // Main emulator display window.
   emulator_window_ =
       EmulatorWindow::Create(emulator_.get(), app_context(),

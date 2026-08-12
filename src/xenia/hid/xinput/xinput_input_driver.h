@@ -16,6 +16,10 @@ namespace xe {
 namespace hid {
 namespace xinput {
 
+// Feeds Xbox Device Portal / CoreWindow gamepad virtual-key events into the
+// XInput path used by both the frontend and guest titles on WinRT.
+bool SetUwpSyntheticGamepadVirtualKey(uint32_t virtual_key, bool down);
+
 class XInputInputDriver final : public InputDriver {
  public:
   explicit XInputInputDriver(xe::ui::Window* window, size_t window_z_order);

@@ -8,7 +8,15 @@
 #include <array>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <chrono>
+#include <thread>
+#include <vector>
+
+#include "xenia/base/platform.h"
+#include <WS2tcpip.h>
+#include <WinSock2.h>
 
 #include "windowed_app_context_uwp.h"
 #include "surface_uwp.h"
@@ -24,8 +32,12 @@
 #include "xenia/base/logging.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/d3d12/d3d12_provider.h"
+#include "xenia/ui/d3d12/d3d12_presenter.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
+#include "xenia/gpu/graphics_system.h"
+#include "xenia/ui/presenter.h"
 #include "xenia/hid/xinput/xinput_hid.h"
+#include "xenia/hid/xinput/xinput_input_driver.h"
 #include "xenia/hid/nop/nop_hid.h"
 #include "xenia/apu/xaudio2/xaudio2_audio_system.h"
 #include "xenia/config.h"
@@ -213,6 +225,12 @@ void UWP::ExecutePendingFunctionsFromUIThread() {
 void UWP::RegisterXeniaWindow(xe::ui::Window* window) { s_window = window; }
 
 void UWP::SetFrontendKeyboardKey(uint32_t virtual_key, bool down) {
+  if (xe::hid::xinput::SetUwpSyntheticGamepadVirtualKey(virtual_key, down)) {
+    XELOGI("[UWP] Synthetic gamepad VK 0x{:02X} {}", virtual_key,
+           down ? "down" : "up");
+    return;
+  }
+
   std::atomic_bool* target = nullptr;
   switch (virtual_key) {
     case 0x25:  // VK_LEFT

@@ -90,6 +90,8 @@ DEFINE_int32(priority_class, 0,
              "values: 0 - Normal, 1 - Above normal, 2 - High",
              "General");
 
+DECLARE_bool(upnp);
+
 namespace xe {
 using namespace xe::literals;
 
@@ -135,6 +137,17 @@ Emulator::Emulator(const std::filesystem::path& command_line,
       XELOGI("Higher priority class request: Successful. New priority: {}",
              cvars::priority_class);
     }
+  }
+
+  // Netplay services are owned by the emulator and must exist before any
+  // profile or title code asks KernelState for the Xbox Live API.
+  xbox_live_api_ = std::make_unique<kernel::XLiveAPI>();
+  network_adapter_manager_ = std::make_unique<kernel::NetworkAdapterManager>();
+  upnp_ = std::make_unique<kernel::UPnP>();
+
+  network_adapter_manager_->Initialize();
+  if (cvars::upnp) {
+    upnp_->Initialize();
   }
 
 #if XE_PLATFORM_WIN32 == 1 && !XE_PLATFORM_WINRT
@@ -183,6 +196,10 @@ Emulator::~Emulator() {
   processor_.reset();
 
   export_resolver_.reset();
+
+  upnp_.reset();
+  network_adapter_manager_.reset();
+  xbox_live_api_.reset();
 
   ExceptionHandler::Uninstall(Emulator::ExceptionCallbackThunk, this);
 }
@@ -1544,6 +1561,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     kernel_state_->xam_state()->LoadSpaInfo(db.get());
 
     kernel_state_->xam_state()->user_tracker()->AddTitleToPlayedList();
+    kernel_state_->xam_state()->user_tracker()->AddDefaultProperties();
+    kernel_state_->xam_state()->user_tracker()->AddDefaultContexts();
 
     if (game_info_database_->IsValid()) {
       title_name_ = game_info_database_->GetTitleName(static_cast<XLanguage>(
@@ -1696,6 +1715,22 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                        module->hash().value());
     }
   }
+
+  if (cvars::upnp && upnp_) {
+    upnp_->Start();
+  }
+
+  if (auto* xbox_live_api = kernel_state_->GetXboxLiveAPI()) {
+    xbox_live_api->Init();
+  } else {
+    XELOGE("Xbox Live API is unavailable during title launch");
+  }
+
+  kernel_state_->xam_state()->StartPeriodicMaintenance();
+
+  // LaunchModule creates the guest main thread suspended. Netplay startup must
+  // finish before the guest runs, then the thread must explicitly be resumed.
+  main_thread_->Resume();
 
   return X_STATUS_SUCCESS;
 }

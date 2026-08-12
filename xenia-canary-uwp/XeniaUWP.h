@@ -10,6 +10,7 @@ class fire_and_forget;
 }
 
 namespace xe {
+class Emulator;
 namespace ui {
 class Window;
 }

@@ -107,22 +107,20 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
   if (input_state) {
     memset((void*)input_state.host_address(), 0, sizeof(X_INPUT_STATE));
   }
-  if (user_index >= XUserMaxUserCount) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-
   if (kernel_state()->xam_state()->IsUIActive()) {
     return X_ERROR_SUCCESS;
   }
 
   // Games call this with a NULL state ptr, probably as a query.
-
+  // Normalize "any user" before validating the slot. Some titles poll the
+  // title screen with XUSER_INDEX_ANY and expect the first controller.
   uint32_t actual_user_index = user_index;
-  // chrispy: change this, logic is not right
   if ((actual_user_index & XUserIndexAny) == XUserIndexAny ||
       (flags & X_INPUT_FLAG::X_INPUT_FLAG_ANY_USER)) {
-    // Always pin user to 0.
     actual_user_index = 0;
+  }
+  if (actual_user_index >= XUserMaxUserCount) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   X_RESULT result;
@@ -130,7 +128,7 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
   {
     auto lock = input_system->lock();
     result = input_system->GetState(
-        user_index, !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags,
+        actual_user_index, !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags,
         input_state);
   }
 
@@ -182,7 +180,7 @@ dword_result_t XamInputGetKeystroke_entry(
 
   auto input_system = kernel_state()->emulator()->input_system();
   auto lock = input_system->lock();
-  return input_system->GetKeystroke(user_index, flags, keystroke);
+  return input_system->GetKeystroke(actual_user_index, flags, keystroke);
 }
 DECLARE_XAM_EXPORT1(XamInputGetKeystroke, kInput, kImplemented);
 

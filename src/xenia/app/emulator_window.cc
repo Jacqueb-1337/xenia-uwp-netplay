@@ -3339,6 +3339,16 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
 
               const ImVec2 item_min = ImGui::GetItemRectMin();
               const ImVec2 item_max = ImGui::GetItemRectMax();
+              if (is_selected) {
+                auto* row_draw_list = ImGui::GetWindowDrawList();
+                const float selection_rounding = 5.0f * display_scale;
+                row_draw_list->AddRectFilled(
+                    item_min, item_max, IM_COL32(18, 18, 18, 190),
+                    selection_rounding);
+                row_draw_list->AddRect(
+                    item_min, item_max, IM_COL32(245, 245, 245, 235),
+                    selection_rounding, 0, 3.0f * display_scale);
+              }
               const float pad = 10.0f * display_scale;
               const float art_size = carousel_card_height - pad * 2.0f;
               const float image_x = item_min.x + pad;
@@ -7575,18 +7585,6 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
             tooltip = c_vibration->description();
           }
 
-          auto c_guide_button = dynamic_cast<cvar::ConfigVar<bool>*>(
-              cvar::ConfigVars->find("guide_button")->second);
-          if (ImGui::Checkbox("Forward Guide Button",
-                              c_guide_button->current_value())) {
-            c_guide_button->SetConfigValue(
-                !c_guide_button->GetTypedConfigValue());
-            config::SaveConfig();
-          }
-
-          if (ImGui::IsItemFocused()) {
-            tooltip = c_guide_button->description();
-          }
         }
 
         if (settings_selected_section == 11) {
@@ -7843,7 +7841,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           ImGui::Indent(about_content_offset_x);
 
           ImGui::TextWrapped(
-              "Xenia Canary UWP NXE 1.1.8.4\n"
+              "Xenia Canary UWP NXE 1.1.8.12\n"
               "A Unofficial fork of Xenia focusing on Xbox support and a blades "
               "style frontend.\n");
 

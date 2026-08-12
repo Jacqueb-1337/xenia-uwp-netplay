@@ -10,6 +10,8 @@
 #include "xenia/vfs/devices/disc_image_file.h"
 
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
+#include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/disc_image_entry.h"
 namespace xe {
 namespace vfs {
@@ -23,21 +25,41 @@ void DiscImageFile::Destroy() { delete this; }
 
 X_STATUS DiscImageFile::ReadSync(std::span<uint8_t> buffer, size_t byte_offset,
                                  size_t* out_bytes_read) {
+  if (out_bytes_read) {
+    *out_bytes_read = 0;
+  }
   if (byte_offset >= entry_->size()) {
     return X_STATUS_END_OF_FILE;
   }
 
+  const size_t real_offset = entry_->data_offset() + byte_offset;
+  const size_t real_length =
+      std::min(buffer.size(), entry_->data_size() - byte_offset);
+
+#if XE_PLATFORM_WINRT
+  auto* device = static_cast<DiscImageDevice*>(entry_->device());
+  size_t bytes_read = 0;
+  if (!device ||
+      !device->ReadImageData(real_offset, buffer.data(), real_length,
+                             &bytes_read)) {
+    XELOGE("Failed to read disc image data at offset 0x{:X}", real_offset);
+    return X_STATUS_UNSUCCESSFUL;
+  }
+  if (out_bytes_read) {
+    *out_bytes_read = bytes_read;
+  }
+  return bytes_read ? X_STATUS_SUCCESS : X_STATUS_END_OF_FILE;
+#else
   auto mmap = entry_->mmap();
   if (!mmap) {
     return X_STATUS_END_OF_FILE;
   }
-
-  size_t real_offset = entry_->data_offset() + byte_offset;
-  size_t real_length =
-      std::min(buffer.size(), entry_->data_size() - byte_offset);
   std::memcpy(buffer.data(), mmap->data() + real_offset, real_length);
-  *out_bytes_read = real_length;
+  if (out_bytes_read) {
+    *out_bytes_read = real_length;
+  }
   return X_STATUS_SUCCESS;
+#endif
 }
 
 }  // namespace vfs
