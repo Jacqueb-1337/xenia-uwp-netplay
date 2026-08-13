@@ -294,6 +294,9 @@ void SigninUI::OnDraw(ImGuiIO& io) {
     pending_login_profiles_ = std::move(profile_map);
     ImGui::CloseCurrentPopup();
     Close();
+    ImGui::EndDisabled();
+    ImGui::EndPopup();
+    return;
   }
   ImGui::EndDisabled();
   ImGui::SameLine(0.0f, button_gap);
@@ -302,6 +305,8 @@ void SigninUI::OnDraw(ImGuiIO& io) {
     pending_login_profiles_.clear();
     ImGui::CloseCurrentPopup();
     Close();
+    ImGui::EndPopup();
+    return;
   }
 
   const float footer_text_size = 13.5f * uy;

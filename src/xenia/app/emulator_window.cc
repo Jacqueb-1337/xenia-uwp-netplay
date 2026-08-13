@@ -3062,7 +3062,22 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
             ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
         const bool is_any_game_context_open =
             is_any_popup_open || show_game_context_menu_ ||
-            show_per_game_config_editor_;
+            show_per_game_config_editor_ || launch_overlay_active_;
+
+        const bool launch_cancel_pressed =
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        if (launch_overlay_active_ && !launch_overlay_committed_ &&
+            launch_cancel_pressed) {
+          XELOGI("[NXE] Cancelled pending launch: {}", launch_overlay_path_);
+          launch_overlay_active_ = false;
+          launch_overlay_path_.clear();
+          launch_overlay_title_.clear();
+          launch_overlay_subtitle_.clear();
+          launch_overlay_art_path_.clear();
+          gamelist_window_focus_requested = true;
+          gamelist_focus_selected_request = true;
+        }
 
         if (controller_b_pressed && !is_any_game_context_open) {
           ImGui::SetWindowFocus("##gamelist_left");
@@ -3240,6 +3255,9 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
         bool request_open_game_context_menu = false;
         bool request_launch_selected_game = false;
         std::string launch_game_path;
+        bool launch_source_rect_valid = false;
+        ImVec2 launch_source_min(0.0f, 0.0f);
+        ImVec2 launch_source_max(0.0f, 0.0f);
         const float gamelist_bottom_lift = 25.0f * display_scale;
         float content_height = ImGui::GetContentRegionAvail().y - gamelist_bottom_lift;
         if (content_height < 120.0f) {
@@ -3401,6 +3419,9 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                   ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false)) {
                 request_launch_selected_game = true;
                 launch_game_path = row.path;
+                launch_source_rect_valid = true;
+                launch_source_min = item_min;
+                launch_source_max = item_max;
               }
 
               if (!is_any_game_context_open && row_focused &&
@@ -5814,9 +5835,38 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           }
         }
 
-        if (request_launch_selected_game && !launch_game_path.empty()) {
-          launch_after_draw = true;
-          launch_path_after_draw = launch_game_path;
+        if (request_launch_selected_game && !launch_game_path.empty() &&
+            !launch_overlay_active_) {
+          launch_overlay_active_ = true;
+          launch_overlay_committed_ = false;
+          launch_overlay_started_at_ = ImGui::GetTime();
+          launch_overlay_path_ = launch_game_path;
+          launch_overlay_title_ = selected_game_name_;
+          launch_overlay_subtitle_.clear();
+          launch_overlay_art_path_.clear();
+          if (selected_row) {
+            launch_overlay_title_ = get_game_display_title(*selected_row);
+            launch_overlay_subtitle_ =
+                get_game_subtitle(*selected_row, launch_overlay_title_);
+            if (const std::string* art_path =
+                    get_gamelist_art_path(*selected_row)) {
+              launch_overlay_art_path_ = *art_path;
+            }
+          }
+          if (launch_source_rect_valid) {
+            launch_overlay_source_min_ = launch_source_min;
+            launch_overlay_source_max_ = launch_source_max;
+          } else {
+            const ImGuiViewport* launch_viewport = ImGui::GetMainViewport();
+            const ImVec2 center(
+                launch_viewport->Pos.x + launch_viewport->Size.x * 0.5f,
+                launch_viewport->Pos.y + launch_viewport->Size.y * 0.5f);
+            launch_overlay_source_min_ = ImVec2(center.x - 90.0f * display_scale,
+                                                center.y - 55.0f * display_scale);
+            launch_overlay_source_max_ = ImVec2(center.x + 90.0f * display_scale,
+                                                center.y + 55.0f * display_scale);
+          }
+          XELOGI("[NXE] Pending launch overlay: {}", launch_overlay_path_);
         }
 
         gamelist_x_was_down = controller_x_down;
@@ -7849,7 +7899,7 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
           ImGui::Indent(about_content_offset_x);
 
           ImGui::TextWrapped(
-              "Xenia Canary UWP NXE 1.1.8.13\n"
+              "Xenia Canary UWP NXE 1.1.8.17\n"
               "An unofficial fork of Xenia focusing on Xbox support and an "
               "NXE-inspired frontend.\n");
 
@@ -8175,6 +8225,165 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
                                    logo_min, logo_max);
     }
 
+    if (launch_overlay_active_) {
+      const ImGuiViewport* launch_viewport = ImGui::GetMainViewport();
+      const ImVec2 viewport_min = launch_viewport->Pos;
+      const ImVec2 viewport_max(
+          viewport_min.x + launch_viewport->Size.x,
+          viewport_min.y + launch_viewport->Size.y);
+      const float launch_scale =
+          std::max(0.75f, launch_viewport->Size.y / 576.0f);
+      const double elapsed =
+          std::max(0.0, ImGui::GetTime() - launch_overlay_started_at_);
+      float transition = static_cast<float>(elapsed / 0.34);
+      transition = std::clamp(transition, 0.0f, 1.0f);
+      transition = transition * transition * (3.0f - 2.0f * transition);
+
+      frontend_draw_list->AddRectFilled(viewport_min, viewport_max,
+                                        IM_COL32(0, 0, 0, 178));
+
+      const ImVec2 target_min(
+          viewport_min.x + launch_viewport->Size.x * 0.115f,
+          viewport_min.y + launch_viewport->Size.y * 0.14f);
+      const ImVec2 target_max(
+          viewport_min.x + launch_viewport->Size.x * 0.885f,
+          viewport_min.y + launch_viewport->Size.y * 0.81f);
+      auto lerp_float = [](float a, float b, float t) {
+        return a + (b - a) * t;
+      };
+      const ImVec2 panel_min(
+          lerp_float(launch_overlay_source_min_.x, target_min.x, transition),
+          lerp_float(launch_overlay_source_min_.y, target_min.y, transition));
+      const ImVec2 panel_max(
+          lerp_float(launch_overlay_source_max_.x, target_max.x, transition),
+          lerp_float(launch_overlay_source_max_.y, target_max.y, transition));
+
+      nxe::DrawGlassPanel(frontend_draw_list, panel_min, panel_max,
+                          8.0f * launch_scale, true);
+      frontend_draw_list->AddRect(
+          panel_min, panel_max, IM_COL32(242, 242, 242, 220),
+          8.0f * launch_scale, 0, 2.0f * launch_scale);
+
+      if (transition > 0.30f) {
+        const float content_alpha =
+            std::clamp((transition - 0.30f) / 0.70f, 0.0f, 1.0f);
+        const ImU32 text_color =
+            IM_COL32(245, 245, 245, static_cast<int>(255.0f * content_alpha));
+        const ImU32 muted_color =
+            IM_COL32(190, 194, 188, static_cast<int>(255.0f * content_alpha));
+        const float pad = 26.0f * launch_scale;
+        const float panel_w = panel_max.x - panel_min.x;
+        const float panel_h = panel_max.y - panel_min.y;
+        const float art_w = std::min(panel_w * 0.39f, panel_h - pad * 2.0f);
+        const ImVec2 art_min(panel_min.x + pad, panel_min.y + pad);
+        const ImVec2 art_max(art_min.x + art_w,
+                             panel_max.y - pad);
+
+        bool drew_art = false;
+        if (!launch_overlay_art_path_.empty()) {
+          auto launch_art = GetOrCreateImageTexture(launch_overlay_art_path_);
+          if (launch_art) {
+            const float src_aspect = launch_art->height > 0
+                                         ? static_cast<float>(launch_art->width) /
+                                               static_cast<float>(launch_art->height)
+                                         : 1.0f;
+            const float box_w = art_max.x - art_min.x;
+            const float box_h = art_max.y - art_min.y;
+            float draw_w = box_w;
+            float draw_h = draw_w / std::max(0.01f, src_aspect);
+            if (draw_h > box_h) {
+              draw_h = box_h;
+              draw_w = draw_h * src_aspect;
+            }
+            const ImVec2 draw_min(
+                art_min.x + (box_w - draw_w) * 0.5f,
+                art_min.y + (box_h - draw_h) * 0.5f);
+            const ImVec2 draw_max(draw_min.x + draw_w, draw_min.y + draw_h);
+            frontend_draw_list->AddImage(
+                reinterpret_cast<ImTextureID>(launch_art.get()), draw_min,
+                draw_max, ImVec2(0, 0), ImVec2(1, 1),
+                IM_COL32(255, 255, 255,
+                         static_cast<int>(255.0f * content_alpha)));
+            drew_art = true;
+          }
+        }
+        if (!drew_art) {
+          frontend_draw_list->AddRectFilled(
+              art_min, art_max,
+              IM_COL32(25, 30, 27, static_cast<int>(225.0f * content_alpha)),
+              5.0f * launch_scale);
+        }
+
+        const float text_x = art_max.x + 30.0f * launch_scale;
+        float text_y = panel_min.y + 44.0f * launch_scale;
+        const float title_font_size = ImGui::GetFontSize() * 1.55f;
+        frontend_draw_list->AddText(
+            ImGui::GetFont(), title_font_size, ImVec2(text_x, text_y),
+            text_color,
+            launch_overlay_title_.empty() ? "Launching Game"
+                                          : launch_overlay_title_.c_str());
+        text_y += title_font_size + 13.0f * launch_scale;
+        if (!launch_overlay_subtitle_.empty()) {
+          frontend_draw_list->AddText(
+              ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(text_x, text_y),
+              muted_color, launch_overlay_subtitle_.c_str());
+          text_y += ImGui::GetFontSize() + 31.0f * launch_scale;
+        } else {
+          text_y += 22.0f * launch_scale;
+        }
+
+        const float spinner_radius = 11.0f * launch_scale;
+        const ImVec2 spinner_center(text_x + spinner_radius,
+                                    text_y + spinner_radius);
+        const float spinner_angle =
+            static_cast<float>(std::fmod(ImGui::GetTime() * 4.2, 6.2831853));
+        frontend_draw_list->PathClear();
+        frontend_draw_list->PathArcTo(
+            spinner_center, spinner_radius, spinner_angle,
+            spinner_angle + 4.65f, 24);
+        frontend_draw_list->PathStroke(
+            IM_COL32(146, 207, 63,
+                     static_cast<int>(255.0f * content_alpha)),
+            0, 3.0f * launch_scale);
+        frontend_draw_list->AddText(
+            ImGui::GetFont(), ImGui::GetFontSize(),
+            ImVec2(spinner_center.x + 21.0f * launch_scale,
+                   text_y + 1.0f * launch_scale),
+            text_color,
+            launch_overlay_committed_ ? "Starting..." : "Loading...");
+
+        const float cancel_w = 118.0f * launch_scale;
+        const float cancel_h = 34.0f * launch_scale;
+        const ImVec2 cancel_max(panel_max.x - pad, panel_max.y - pad);
+        const ImVec2 cancel_min(cancel_max.x - cancel_w,
+                                cancel_max.y - cancel_h);
+        frontend_draw_list->AddRectFilled(
+            cancel_min, cancel_max,
+            IM_COL32(22, 27, 24, static_cast<int>(235.0f * content_alpha)),
+            cancel_h * 0.45f);
+        frontend_draw_list->AddRect(
+            cancel_min, cancel_max,
+            IM_COL32(255, 255, 255, static_cast<int>(70.0f * content_alpha)),
+            cancel_h * 0.45f);
+        frontend_draw_list->AddText(
+            ImGui::GetFont(), ImGui::GetFontSize() * 0.88f,
+            ImVec2(cancel_min.x + 15.0f * launch_scale,
+                   cancel_min.y + 8.0f * launch_scale),
+            muted_color, "B   Cancel");
+      }
+
+      // Give the expansion enough time to be visible and cancellable before
+      // committing the synchronous title mount/load. Cached PSO creation on
+      // Xbox is lazy, so this handoff should no longer stall for tens of
+      // seconds.
+      if (!launch_overlay_committed_ && elapsed >= 1.15) {
+        launch_overlay_committed_ = true;
+        launch_after_draw = true;
+        launch_path_after_draw = launch_overlay_path_;
+        XELOGI("[NXE] Committing pending launch: {}", launch_overlay_path_);
+      }
+    }
+
     DrawNoProfilePrompt(io);
 
     frontend_draw_list->PopClipRect();
@@ -8185,9 +8394,17 @@ void EmulatorWindow::WinRTFrontendDialog::OnDraw(ImGuiIO& io) {
   ImGui::PopStyleColor(3);
 
   if (launch_after_draw && !launch_path_after_draw.empty()) {
-    emulator_window_.emulator_->LaunchPath(launch_path_after_draw);
-    Close();
-    return;
+    const X_STATUS launch_result =
+        emulator_window_.emulator_->LaunchPath(launch_path_after_draw);
+    if (launch_result == X_STATUS_SUCCESS) {
+      Close();
+      return;
+    }
+    XELOGE("[NXE] Failed to launch {}: {:08X}", launch_path_after_draw,
+           launch_result);
+    launch_overlay_active_ = false;
+    launch_overlay_committed_ = false;
+    launch_overlay_path_.clear();
   }
 }
 

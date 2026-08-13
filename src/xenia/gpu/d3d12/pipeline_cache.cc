@@ -269,6 +269,20 @@ void PipelineCache::InitializeShaderStorage(
   shader_storage_file_flush_needed_ = false;
   pipeline_storage_file_flush_needed_ = false;
 
+#if XE_PLATFORM_WINRT
+  // Xbox Dev Mode has a much tighter memory budget than desktop Xenia. The
+  // persistent pipeline-description file is still useful here to identify and
+  // pretranslate stored shaders, but eagerly materializing every stored D3D12
+  // PSO caused 30+ second launch stalls and severe post-launch memory pressure.
+  // Keep the shader benefit and let the normal runtime path create only the
+  // pipelines the title actually uses.
+  if (!pipeline_stored_descriptions.empty()) {
+    XELOGI("Xbox/UWP: skipping preload of {} stored D3D12 pipelines",
+           pipeline_stored_descriptions.size());
+    pipeline_stored_descriptions.clear();
+  }
+#endif
+
   // Create the pipelines.
   if (!pipeline_stored_descriptions.empty()) {
     uint64_t pipeline_creation_start_ = xe::Clock::QueryHostTickCount();
@@ -769,6 +783,13 @@ bool PipelineCache::ConfigurePipeline(
   // to compile and don't benefit from async (vertex shaders are small).
   bool use_async = cvars::async_shader_compilation &&
                    !creation_threads_.empty() && pixel_shader != nullptr;
+#if XE_PLATFORM_WINRT
+  // Xbox Dev Mode's D3D12 driver suffers badly when multiple background PSO
+  // creation workers compete with the guest render thread. Cached shader
+  // translations are already cheap to restore; create only first-used PSOs,
+  // synchronously, so a draw never spins for seconds on a missing pipeline.
+  use_async = false;
+#endif
 
   // Ensure VS ucode is analyzed (needed for description hash).
   if (!vertex_shader->shader().is_ucode_analyzed()) {
@@ -883,12 +904,18 @@ bool PipelineCache::ConfigurePipeline(
   }
 
   if (storage_writer_.is_active()) {
+#if !XE_PLATFORM_WINRT
+    // Desktop persists pipeline descriptions so the driver PSO cache can be
+    // warmed on later runs. Xbox/UWP intentionally doesn't persist new PSO
+    // descriptions because it never preloads them; retaining only shader
+    // storage avoids an ever-growing unused .xpso file on the console.
     pipeline_storage_file_flush_needed_ = true;
     PipelineStoredDescription stored_description;
     stored_description.description_hash = hash;
     std::memcpy(&stored_description.description, &description,
                 sizeof(description));
     storage_writer_.QueuePipelineWrite(stored_description);
+#endif
   }
 
   current_pipeline_ = new_pipeline;

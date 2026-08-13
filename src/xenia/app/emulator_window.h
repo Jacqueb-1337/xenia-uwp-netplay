@@ -359,6 +359,19 @@ class EmulatorWindow {
     std::string search_selected_game_path_;
     char search_input_buffer_[128] = {};
     bool no_profile_prompt_dismissed_ = false;
+
+    // NXE-style launch transition state. The frontend keeps rendering while
+    // the selected card expands into a game-details/loading panel, allowing B
+    // to cancel before the title launch is committed.
+    bool launch_overlay_active_ = false;
+    bool launch_overlay_committed_ = false;
+    double launch_overlay_started_at_ = 0.0;
+    std::string launch_overlay_path_;
+    std::string launch_overlay_title_;
+    std::string launch_overlay_subtitle_;
+    std::string launch_overlay_art_path_;
+    ImVec2 launch_overlay_source_min_ = ImVec2(0.0f, 0.0f);
+    ImVec2 launch_overlay_source_max_ = ImVec2(0.0f, 0.0f);
   };
 
 #endif  // XE_PLATFORM_WINRT
